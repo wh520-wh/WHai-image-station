@@ -1,8 +1,6 @@
 import sys
 import os
 import asyncio
-import os.path as osp
-sys.path.insert(0, osp.dirname(osp.dirname(osp.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QTimer, QSharedMemory

@@ -8,8 +8,7 @@ from PySide6.QtCore import Qt, Signal, QTimer, QUrl
 from datetime import datetime, timedelta
 from PySide6.QtGui import QPixmap, QPixmapCache, QFont, QDesktopServices
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import os
 
 from src.widgets.theme import COLORS, RADIUS, SPACING, app_font, apply_card_style, button_style, compact_input_style, label_style, make_empty_state_label, scroll_area_style
 

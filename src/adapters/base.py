@@ -4,8 +4,7 @@ from typing import Optional
 import httpx
 from PIL import Image
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import os
 
 from src.config import constants
 from src.models.task import GenerationTask
