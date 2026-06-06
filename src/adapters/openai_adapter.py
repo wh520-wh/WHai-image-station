@@ -84,6 +84,15 @@ class OpenAIAdapter(BaseAdapter):
         payload = self.build_generation_payload(task, config)
         generation_url = self.build_url(config.api_base_url, "/images/generations", config)
         headers = self.build_headers(config)
+        source_info = {
+            "name": config.source_name or config.name,
+            "auth_preset": config.auth_preset,
+            "interface_type": config.interface_type,
+        }
+        model_info = {
+            "display_name": config.model_display_name or config.model_name,
+            "model_id": config.model_name,
+        }
         started_at = time.perf_counter()
         try:
             client = self.get_http_client(config)
@@ -99,15 +108,16 @@ class OpenAIAdapter(BaseAdapter):
             os.makedirs(constants.GENERATIONS_DIR, exist_ok=True)
             image_refs = self._extract_image_refs(data, config.response_format)
             if not image_refs:
+                error_msg = f"响应格式不匹配：当前使用「{config.response_format}」解析，未提取到图片。请检查设置的响应格式选项。原始响应: {str(data)[:500]}"
                 return GenerationResult(
                     success=False,
-                    error=f"响应格式不匹配：当前使用「{config.response_format}」解析，未提取到图片。请检查设置的响应格式选项。原始响应: {str(data)[:500]}",
+                    error=error_msg,
                     raw_response={"diagnostic": self.build_request_diagnostic(
                         url=generation_url,
-                        source={"name": config.source_name or config.name, "auth_preset": config.auth_preset, "interface_type": config.interface_type},
-                        model={"display_name": config.model_display_name or config.model_name, "model_id": config.model_name},
+                        source=source_info,
+                        model=model_info,
                         payload=payload, headers=headers, duration_ms=int((time.perf_counter() - started_at) * 1000),
-                        status="FAILED", error="响应格式不匹配，未提取到图片",
+                        status="FAILED", error=error_msg,
                     )}
                 )
             image_paths = []
@@ -130,8 +140,8 @@ class OpenAIAdapter(BaseAdapter):
 
             diagnostic = self.build_request_diagnostic(
                 url=generation_url,
-                source={"name": config.source_name or config.name, "auth_preset": config.auth_preset, "interface_type": config.interface_type},
-                model={"display_name": config.model_display_name or config.model_name, "model_id": config.model_name},
+                source=source_info,
+                model=model_info,
                 payload=payload,
                 headers=headers,
                 duration_ms=duration_ms,
@@ -144,8 +154,8 @@ class OpenAIAdapter(BaseAdapter):
             error = self.format_http_status_error(exc)
             diagnostic = self.build_request_diagnostic(
                 url=generation_url,
-                source={"name": config.source_name or config.name, "auth_preset": config.auth_preset, "interface_type": config.interface_type},
-                model={"display_name": config.model_display_name or config.model_name, "model_id": config.model_name},
+                source=source_info,
+                model=model_info,
                 payload=payload,
                 headers=headers,
                 duration_ms=duration_ms,
@@ -158,8 +168,8 @@ class OpenAIAdapter(BaseAdapter):
             error = self.format_generation_exception(exc, generation_url, payload)
             diagnostic = self.build_request_diagnostic(
                 url=generation_url,
-                source={"name": config.source_name or config.name, "auth_preset": config.auth_preset, "interface_type": config.interface_type},
-                model={"display_name": config.model_display_name or config.model_name, "model_id": config.model_name},
+                source=source_info,
+                model=model_info,
                 payload=payload,
                 headers=headers,
                 duration_ms=duration_ms,
