@@ -2,7 +2,7 @@ import aiosqlite
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 from ..config import constants
 
@@ -452,8 +452,12 @@ class Database:
             if key not in ALLOWED_UPDATE_COLUMNS:
                 raise ValueError(f"Disallowed column name: {key}")
         sets = ["status = ?"]
-        vals: list = [status]
+        vals: list[Any] = [status]
         for k, v in kwargs.items():
+            # status is always set first from the positional arg; skip duplicates
+            # to avoid `SET status = ?, status = ?, ...` in the generated SQL.
+            if k == "status":
+                continue
             sets.append(f"{k} = ?")
             vals.append(v)
         vals.append(task_id)
