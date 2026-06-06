@@ -1,0 +1,125 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Optional
+import httpx
+from PIL import Image
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from src.config import constants
+from src.models.task import GenerationTask
+from src.models.platform_config import PlatformConfig
+
+
+AUTH_PRESETS = {
+    "openai": ("Authorization", "Bearer {key}"),
+    "anthropic": ("x-api-key", "{key}"),
+    "gemini": ("x-goog-api-key", "{key}"),
+    "xai": ("Authorization", "Bearer {key}"),
+    "cohere": ("Authorization", "Bearer {key}"),
+    "custom": ("Authorization", "Bearer {key}"),
+}
+
+
+@dataclass
+class GenerationResult:
+    success: bool
+    image_paths: list[str] = None
+    error: str = None
+    raw_response: dict = None
+
+
+class BaseAdapter(ABC):
+    platform_id: str = ""
+    platform_name: str = ""
+
+    def __init__(self):
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_shared_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(constants.REQUEST_TIMEOUT, connect=10.0),
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+            )
+        return self._http_client
+
+    async def close(self):
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    @abstractmethod
+    def get_params_schema(self) -> dict:
+        """返回该平台支持的参数定义"""
+        pass
+
+    @abstractmethod
+    async def validate_config(self, config: PlatformConfig) -> bool:
+        """验证配置是否有效"""
+        pass
+
+    @abstractmethod
+    async def generate(self, task: GenerationTask, config: PlatformConfig) -> GenerationResult:
+        """执行图片生成"""
+        pass
+
+    def build_headers(self, config: PlatformConfig) -> dict:
+        """构建请求头"""
+        headers = {"Content-Type": "application/json"}
+        if config.api_key:
+            header_name, template = AUTH_PRESETS.get(config.auth_preset, AUTH_PRESETS["openai"])
+            headers[header_name] = template.format(key=config.api_key)
+        if config.custom_headers:
+            headers.update(config.custom_headers)
+        return headers
+
+    def redact_headers(self, headers: dict) -> dict:
+        sensitive = {"authorization", "x-api-key", "x-goog-api-key", "cookie"}
+        return {
+            key: "<redacted>" if key.lower() in sensitive else value
+            for key, value in (headers or {}).items()
+        }
+
+
+    def build_url(self, base_url: str, path: str, config: Optional[PlatformConfig] = None) -> str:
+        """Join API base URL and endpoint path for relay/proxy compatibility.
+        当 interface_type 为 'custom' 时，base_url 将直接作为完整请求地址，不追加 path。
+        """
+        if config and config.interface_type == "custom":
+            return base_url.rstrip('/')
+        return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+    def get_http_client(self, config: PlatformConfig = None) -> httpx.AsyncClient:
+        return self._get_shared_client()
+
+    async def download_image(self, url: str, save_path: str, config: PlatformConfig) -> str:
+        client = self._get_shared_client()
+        headers = {}
+        if config.api_key:
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        if config.custom_headers:
+            headers.update(config.custom_headers)
+
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+
+        try:
+            with open(save_path, "wb") as f:
+                f.write(response.content)
+        except (IOError, OSError) as e:
+            raise IOError(f"Failed to save image to {save_path}: {e}") from e
+        return save_path
+
+    def _create_thumbnail(self, image_path: str):
+        os.makedirs(constants.THUMBNAILS_DIR, exist_ok=True)
+        name = os.path.basename(image_path)
+        thumb_name = f"thumb_{os.path.splitext(name)[0]}.jpg"
+        thumb_path = os.path.join(constants.THUMBNAILS_DIR, thumb_name)
+        try:
+            img = Image.open(image_path)
+            img.thumbnail((200, 200))
+            img.save(thumb_path, "JPEG", quality=85, optimize=True)
+        except Exception:
+            pass
