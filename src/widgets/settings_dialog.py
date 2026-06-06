@@ -16,6 +16,7 @@ import json
 
 from src.adapters import get_adapter
 from src.config import constants, encryption
+from src.config.utils import parse_headers, safe_int
 from src.models.platform_config import PlatformConfig
 from src.widgets.theme import COLORS, RADIUS, SPACING, app_font, apply_card_style, button_style, input_style, label_style, tab_style
 
@@ -466,7 +467,7 @@ class SettingsDialog(QDialog):
         self.proxy_check.setChecked(bool(proxy))
         self.proxy_input.setText(proxy)
         self.active_check.setChecked(bool(source.get("is_active", 1)))
-        self._fill_header_table(self._parse_headers(source.get("custom_headers")))
+        self._fill_header_table(parse_headers(source.get("custom_headers")))
         self._fill_model_table(self.models_by_source.get(self.current_source_id, []))
         self._update_url_preview(self.interface_combo.currentData() or "openai_images")
 
@@ -577,32 +578,15 @@ class SettingsDialog(QDialog):
                 "model_id": model_item.text().strip(),
                 "default_size": self._table_text(row, 2) or "1024x1024",
                 "default_quality": self._table_text(row, 3) or "standard",
-                "default_n": self._safe_int(self._table_text(row, 4), 1),
+                "default_n": safe_int(self._table_text(row, 4), 1),
                 "sort_order": row,
                 "is_active": 1,
             })
         return models
 
-    def _safe_int(self, value: str, default: int) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
     def _table_text(self, row: int, col: int) -> str:
         item = self.model_table.item(row, col)
         return item.text().strip() if item else ""
-
-    def _parse_headers(self, raw_headers) -> dict[str, str]:
-        if not raw_headers:
-            return {}
-        if isinstance(raw_headers, dict):
-            return {str(key): str(value) for key, value in raw_headers.items()}
-        try:
-            parsed = json.loads(raw_headers)
-        except (TypeError, json.JSONDecodeError):
-            return {}
-        return {str(key): str(value) for key, value in parsed.items()} if isinstance(parsed, dict) else {}
 
     def _build_generation_url_preview(self, platform_id: str, base_url: str) -> str:
         adapter_key = "openai" if platform_id == "openai_images" else platform_id

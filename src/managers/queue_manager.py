@@ -1,17 +1,15 @@
 import asyncio
-import json
 import threading
 from datetime import datetime
 from collections import deque
 from typing import Optional, Callable
-
-import os
 
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
 from src.adapters import get_adapter
 from src.config import constants, database
 from src.config.encryption import decrypt
+from src.config.utils import parse_headers, get_thumbnail_path
 
 
 class QueueManager:
@@ -177,7 +175,7 @@ class QueueManager:
         try:
             api_key_encrypted = config_data.get("api_key_encrypted")
             api_key = decrypt(api_key_encrypted) if api_key_encrypted else ""
-            custom_headers = self._parse_headers(config_data.get("custom_headers"))
+            custom_headers = parse_headers(config_data.get("custom_headers"))
         except Exception as exc:
             await self._fail_task(task, f"平台配置读取失败，请重新保存配置: {exc}")
             return None
@@ -226,16 +224,6 @@ class QueueManager:
             "response_format": source.get("response_format", "openai"),
         }
 
-    def _parse_headers(self, raw_headers) -> dict[str, str]:
-        if not raw_headers:
-            return {}
-        if isinstance(raw_headers, dict):
-            return {str(key): str(value) for key, value in raw_headers.items()}
-        parsed = json.loads(raw_headers)
-        if not isinstance(parsed, dict):
-            return {}
-        return {str(key): str(value) for key, value in parsed.items()}
-
     async def _fail_task(self, task: GenerationTask, error: str):
         task.status = "FAILED"
         task.error = error
@@ -264,7 +252,7 @@ class QueueManager:
                 "negative_prompt": task.negative_prompt,
                 "params": params,
                 "image_path": image_path,
-                "thumbnail_path": self._get_thumbnail_path(image_path),
+                "thumbnail_path": get_thumbnail_path(image_path),
                 "result_paths_json": result_paths_json,
                 "status": task.status,
                 "error": task.error,
@@ -285,13 +273,6 @@ class QueueManager:
             return
         with self._events_lock:
             self._status_events.append((task, status))
-
-    def _get_thumbnail_path(self, image_path: str) -> Optional[str]:
-        if not image_path:
-            return None
-        name = os.path.basename(image_path)
-        thumb_name = f"thumb_{os.path.splitext(name)[0]}.jpg"
-        return os.path.join(constants.THUMBNAILS_DIR, thumb_name)
 
     def get_queue_info(self) -> dict:
         with self._tasks_lock:

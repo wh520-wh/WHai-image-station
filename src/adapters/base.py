@@ -7,6 +7,7 @@ from PIL import Image
 import os
 
 from src.config import constants
+from src.config.utils import get_thumbnail_path
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
 
@@ -112,10 +113,10 @@ class BaseAdapter(ABC):
         return save_path
 
     def _create_thumbnail(self, image_path: str):
+        thumb_path = get_thumbnail_path(image_path)
+        if not thumb_path:
+            return
         os.makedirs(constants.THUMBNAILS_DIR, exist_ok=True)
-        name = os.path.basename(image_path)
-        thumb_name = f"thumb_{os.path.splitext(name)[0]}.jpg"
-        thumb_path = os.path.join(constants.THUMBNAILS_DIR, thumb_name)
         try:
             img = Image.open(image_path)
             img.thumbnail((200, 200))

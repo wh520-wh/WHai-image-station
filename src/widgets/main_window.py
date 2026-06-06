@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 
-import os
 from collections import deque
 
 from src.widgets.prompt_panel import PromptPanel
@@ -19,6 +18,7 @@ from src.managers import QueueManager, PromptManager, HistoryManager
 from src.managers.task_chain_manager import TaskChainManager
 from src.adapters import get_all_adapters
 from src.config.event_loop import run_async
+from src.config.utils import get_thumbnail_path
 
 
 class MainWindow(QWidget):
@@ -352,9 +352,6 @@ class MainWindow(QWidget):
             self.generation_panel.show_status("\u751f\u6210\u5b8c\u6210\uff0c\u5df2\u52a0\u5165\u5386\u53f2\u753b\u5eca\u3002", "success")
             self.generation_panel.update_diagnostic(task.params.get("_diagnostic", {}) if isinstance(task.params, dict) else {})
             if task.result_paths:
-                from src.config import constants
-                name = os.path.basename(task.result_paths[0])
-                thumb_name = f"thumb_{os.path.splitext(name)[0]}.jpg"
                 self.history_panel.add_record({
                     "task_id": str(task.id),
                     "platform_id": task.platform_id,
@@ -362,7 +359,7 @@ class MainWindow(QWidget):
                     "model_config_id": task.model_config_id,
                     "prompt": task.prompt,
                     "image_path": task.result_paths[0],
-                    "thumbnail_path": os.path.join(constants.THUMBNAILS_DIR, thumb_name),
+                    "thumbnail_path": get_thumbnail_path(task.result_paths[0]),
                     "status": task.status,
                     "negative_prompt": task.negative_prompt,
                     "params": task.params,
