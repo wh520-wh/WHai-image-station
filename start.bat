@@ -35,6 +35,13 @@ if not exist ".venv\.deps_installed" (
         pause
         exit /b 1
     )
+    echo [INFO] Installing project in editable mode...
+    pip install -e . -q
+    if errorlevel 1 (
+        echo [ERROR] Failed to install project
+        pause
+        exit /b 1
+    )
     type nul > ".venv\.deps_installed"
 )
 

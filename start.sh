@@ -24,6 +24,8 @@ source .venv/bin/activate
 if [ ! -f ".venv/.deps_installed" ]; then
     echo "[INFO] Installing dependencies..."
     pip install -r requirements.txt -q
+    echo "[INFO] Installing project in editable mode..."
+    pip install -e . -q
     touch .venv/.deps_installed
 fi
 
