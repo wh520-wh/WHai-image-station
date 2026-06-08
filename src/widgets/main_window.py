@@ -17,6 +17,7 @@ from src.widgets.task_chain_editor import TaskChainEditor
 from src.managers import QueueManager, PromptManager, HistoryManager
 from src.managers.task_chain_manager import TaskChainManager
 from src.adapters import get_all_adapters
+from src.adapters.errors import Category, Diagnostic
 from src.config.event_loop import run_async
 from src.config.utils import get_thumbnail_path
 
@@ -57,7 +58,7 @@ class MainWindow(QWidget):
         self._start_queue_polling()
 
     def _setup_ui(self):
-        self.setWindowTitle("imageMaker - 图片生成工具")
+        self.setWindowTitle("WHai Image Station - 图片生成工具")
         self.setMinimumSize(1200, 700)
         # 检测屏幕尺寸，仅在超大分辨率使用纯色避免重绘延迟
         screen = QApplication.primaryScreen()
@@ -344,13 +345,27 @@ class MainWindow(QWidget):
         elif status == "generating":
             self.generation_panel.show_status("\u6b63\u5728\u751f\u6210\u56fe\u7247\u4e2d\u2026\u8bf7\u7a0d\u5019\u3002", "info")
         elif status == "failed":
-            error_display = self._classify_error(task.error)
-            self.generation_panel.show_status(error_display, "error")
-            self.generation_panel.update_diagnostic(task.params.get("_diagnostic", {}) if isinstance(task.params, dict) else {}, expand=True)
+            diag_obj = None
+            if isinstance(task.params, dict):
+                raw = task.params.get("_diagnostic")
+                if isinstance(raw, Diagnostic):
+                    diag_obj = raw
+                elif isinstance(raw, dict):
+                    diag_obj = Diagnostic.from_dict(raw)
+            if diag_obj is None:
+                diag_obj = Diagnostic(
+                    category=Category.UNKNOWN,
+                    original=task.error or "",
+                    platform=task.platform_id,
+                )
+            self.generation_panel.update_diagnostic(diag_obj, expand=True)
+            self.generation_panel.show_status(diag_obj.hint or diag_obj.original or "生成失败", "error")
             self._refresh_diagnostic_history()
         elif status == "completed":
             self.generation_panel.show_status("\u751f\u6210\u5b8c\u6210\uff0c\u5df2\u52a0\u5165\u5386\u53f2\u753b\u5eca\u3002", "success")
-            self.generation_panel.update_diagnostic(task.params.get("_diagnostic", {}) if isinstance(task.params, dict) else {})
+            raw = task.params.get("_diagnostic") if isinstance(task.params, dict) else None
+            diag_obj = raw if isinstance(raw, Diagnostic) else (Diagnostic.from_dict(raw) if isinstance(raw, dict) else None)
+            self.generation_panel.update_diagnostic(diag_obj)
             if task.result_paths:
                 self.history_panel.add_record({
                     "task_id": str(task.id),
@@ -425,22 +440,6 @@ class MainWindow(QWidget):
             if editor and not editor.isHidden():
                 editor._refresh_chain_list(getattr(chain, "id", None))
 
-    def _classify_error(self, error_msg: str | None) -> str:
-        """根据错误信息特征返回更具体的用户提示。"""
-        if not error_msg:
-            return "生成失败：请检查配置或网络连接"
-        msg_lower = error_msg.lower()
-        if any(kw in msg_lower for kw in ("timeout", "timed out", "connect", "refused")):
-            return f"网络连接失败：{error_msg}"
-        if any(kw in msg_lower for kw in ("401", "403", "unauthorized", "forbidden")):
-            return f"鉴权失败，请检查 API Key：{error_msg}"
-        if any(kw in msg_lower for kw in ("429", "rate limit", "quota")):
-            return f"请求频率超限，请稍后重试：{error_msg}"
-        if any(kw in msg_lower for kw in ("500", "502", "503", "server error")):
-            return f"服务器错误，请稍后重试：{error_msg}"
-        if any(kw in msg_lower for kw in ("resolution", "size", "dimension")):
-            return f"图片尺寸参数无效：{error_msg}"
-        return f"生成失败：{error_msg}"
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
