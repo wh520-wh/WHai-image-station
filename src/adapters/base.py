@@ -10,6 +10,7 @@ from src.config import constants
 from src.config.utils import get_thumbnail_path
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
+from src.adapters.errors import Category, Field, Diagnostic, AdapterError
 
 
 AUTH_PRESETS = {
@@ -82,6 +83,36 @@ class BaseAdapter(ABC):
             for key, value in (headers or {}).items()
         }
 
+    def report_error(
+        self,
+        category: Category,
+        *,
+        original: str = "",
+        fields: list[Field] | None = None,
+        hint: str | None = None,
+        source_id: str = "",
+    ) -> "AdapterError":
+        diagnostic = Diagnostic(
+            category=category,
+            fields=tuple(fields or ()),
+            hint=hint,
+            original=original,
+            platform=self.platform_id,
+            source_id=source_id,
+        )
+        return AdapterError(str(diagnostic), diagnostic)
+
+    @staticmethod
+    def classify_status(status_code: int) -> Category:
+        if status_code in (401, 403):
+            return Category.AUTH
+        if status_code == 429:
+            return Category.RATE_LIMIT
+        if 500 <= status_code < 600:
+            return Category.SERVER
+        if 400 <= status_code < 500:
+            return Category.BAD_REQUEST
+        return Category.UNKNOWN
 
     def build_url(self, base_url: str, path: str, config: Optional[PlatformConfig] = None) -> str:
         """Join API base URL and endpoint path for relay/proxy compatibility.
