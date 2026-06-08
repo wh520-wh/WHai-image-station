@@ -1,6 +1,7 @@
 ﻿import pytest
 
 from src.adapters.base import BaseAdapter
+from src.adapters.errors import Category, Diagnostic
 from src.adapters.openai_adapter import OpenAIAdapter
 from src.models.platform_config import PlatformConfig
 from src.models.task import GenerationTask
@@ -176,3 +177,39 @@ def test_openai_adapter_extracts_http_error_message_from_json():
     message = adapter.format_http_status_error(httpx.HTTPStatusError("bad", request=response.request, response=response))
 
     assert message == "HTTP错误 400: Invalid size"
+
+
+def _make_task_and_config():
+    task = GenerationTask(platform_id="openai", prompt="a cat", params={"size": "1024x1024", "n": 1})
+    config = PlatformConfig(
+        id="openai",
+        name="OpenAI",
+        api_key="test-key",
+        api_base_url="https://api.example.com/v1",
+        auth_preset="openai",
+        interface_type="openai_images",
+        model_name="dall-e-3",
+        response_format="openai",
+    )
+    return task, config
+
+
+def test_openai_generate_returns_diagnostic_on_401(monkeypatch):
+    import asyncio
+    import httpx
+
+    async def fake_post(self, url, **kwargs):
+        request = httpx.Request("POST", url)
+        response = httpx.Response(401, request=request, text="Unauthorized")
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    adapter = OpenAIAdapter()
+    task, config = _make_task_and_config()
+    result = asyncio.run(adapter.generate(task, config))
+    assert result.success is False
+    diag = result.raw_response.get("diagnostic")
+    assert isinstance(diag, Diagnostic)
+    assert diag.category == Category.AUTH
+    assert diag.platform == "openai"
+    assert "401" in diag.original

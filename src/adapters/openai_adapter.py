@@ -7,6 +7,7 @@ from datetime import datetime
 
 import httpx
 
+from src.adapters.errors import Category, Field, Diagnostic
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
 from src.config import constants
@@ -108,17 +109,15 @@ class OpenAIAdapter(BaseAdapter):
             os.makedirs(constants.GENERATIONS_DIR, exist_ok=True)
             image_refs = self._extract_image_refs(data, config.response_format)
             if not image_refs:
-                error_msg = f"响应格式不匹配：当前使用「{config.response_format}」解析，未提取到图片。请检查设置的响应格式选项。原始响应: {str(data)[:500]}"
+                original = f"响应格式不匹配：当前使用「{config.response_format}」解析，未提取到图片。请检查设置的响应格式选项。原始响应: {str(data)[:500]}"
+                diagnostic = self._build_diagnostic(
+                    Category.CONTENT, generation_url, headers, payload, duration_ms,
+                    source_info, model_info, original,
+                )
                 return GenerationResult(
                     success=False,
-                    error=error_msg,
-                    raw_response={"diagnostic": self.build_request_diagnostic(
-                        url=generation_url,
-                        source=source_info,
-                        model=model_info,
-                        payload=payload, headers=headers, duration_ms=int((time.perf_counter() - started_at) * 1000),
-                        status="FAILED", error=error_msg,
-                    )}
+                    error=original,
+                    raw_response={"diagnostic": diagnostic},
                 )
             image_paths = []
             for index, image_ref in enumerate(image_refs):
@@ -138,45 +137,92 @@ class OpenAIAdapter(BaseAdapter):
                 image_paths.append(save_path)
                 self._create_thumbnail(save_path)
 
-            diagnostic = self.build_request_diagnostic(
-                url=generation_url,
-                source=source_info,
-                model=model_info,
-                payload=payload,
-                headers=headers,
-                duration_ms=duration_ms,
-                status="COMPLETED",
+            diagnostic = self._build_diagnostic(
+                Category.UNKNOWN, generation_url, headers, payload, duration_ms,
+                source_info, model_info, original=None,
                 response_summary=f"返回 {len(image_paths)} 张图片",
             )
-            return GenerationResult(success=True, image_paths=image_paths, raw_response={"data": data, "diagnostic": diagnostic})
+            return GenerationResult(
+                success=True,
+                image_paths=image_paths,
+                raw_response={"data": data, "diagnostic": diagnostic},
+            )
         except httpx.HTTPStatusError as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
-            error = self.format_http_status_error(exc)
-            diagnostic = self.build_request_diagnostic(
-                url=generation_url,
-                source=source_info,
-                model=model_info,
-                payload=payload,
-                headers=headers,
-                duration_ms=duration_ms,
-                status="FAILED",
-                error=error,
+            original = self.format_http_status_error(exc)
+            category = self.classify_status(exc.response.status_code)
+            diagnostic = self._build_diagnostic(
+                category, generation_url, headers, payload, duration_ms,
+                source_info, model_info, original,
+                status_code=exc.response.status_code,
             )
-            return GenerationResult(success=False, error=error, raw_response={"diagnostic": diagnostic})
+            return GenerationResult(
+                success=False,
+                error=original,
+                raw_response={"diagnostic": diagnostic},
+            )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
-            error = self.format_generation_exception(exc, generation_url, payload)
-            diagnostic = self.build_request_diagnostic(
-                url=generation_url,
-                source=source_info,
-                model=model_info,
-                payload=payload,
-                headers=headers,
-                duration_ms=duration_ms,
-                status="FAILED",
-                error=error,
+            original = self.format_generation_exception(exc, generation_url, payload)
+            category = self._classify_exception(exc)
+            diagnostic = self._build_diagnostic(
+                category, generation_url, headers, payload, duration_ms,
+                source_info, model_info, original,
             )
-            return GenerationResult(success=False, error=error, raw_response={"diagnostic": diagnostic})
+            return GenerationResult(
+                success=False,
+                error=original,
+                raw_response={"diagnostic": diagnostic},
+            )
+
+    def _build_diagnostic(
+        self,
+        category: Category,
+        url: str,
+        headers: dict,
+        payload: dict,
+        duration_ms: int,
+        source_info: dict,
+        model_info: dict,
+        original: str | None,
+        status_code: int | None = None,
+        response_summary: str | None = None,
+    ) -> Diagnostic:
+        fields: list[Field] = []
+        fields.append(Field(name="URL", value=url, issue="请求地址"))
+        if status_code is not None:
+            fields.append(Field(name="HTTP status", value=str(status_code), issue="响应状态码"))
+        for key, value in (payload or {}).items():
+            if value in (None, ""):
+                continue
+            fields.append(Field(name=f"payload.{key}", value=str(value)[:200], issue="请求参数"))
+        return Diagnostic(
+            category=category,
+            fields=tuple(fields),
+            hint=self._hint_for(category),
+            original=original or "",
+            platform=self.platform_id,
+            source_id=source_info.get("name", ""),
+        )
+
+    @staticmethod
+    def _classify_exception(exc: Exception) -> Category:
+        if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException)):
+            return Category.NETWORK
+        return Category.UNKNOWN
+
+    @staticmethod
+    def _hint_for(category: Category) -> str | None:
+        hints = {
+            Category.AUTH: "请检查设置中的 API Key 是否正确。",
+            Category.RATE_LIMIT: "请求频率超限，请稍后重试。",
+            Category.NETWORK: "网络问题：检查 Base URL、代理或中转站可用性。",
+            Category.SERVER: "服务器错误，请稍后重试。",
+            Category.BAD_REQUEST: "请求参数不合法，请检查尺寸/质量等参数。",
+            Category.CONTENT: "响应内容无法解析，请检查响应格式设置或模型兼容性。",
+            Category.UNKNOWN: "请复制诊断发给开发者。",
+        }
+        return hints.get(category)
 
     def _extract_image_refs(self, data: dict, response_format: str = "openai") -> list[str]:
         """按指定的响应格式提取图片 URL/base64 列表。"""
