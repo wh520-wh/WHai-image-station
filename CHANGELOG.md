@@ -4,7 +4,13 @@
 
 ## [Unreleased]
 
+### Added
+- 失败时显示结构化诊断卡（`DiagnosticCard`）：分类徽章 + 字段表 + 可折叠原文 + 一键复制 JSON
+- API Key 等敏感字段可标记 `redact=True`，复制时输出 `"***"`
+- 设置页新增 `_show_validation_diagnostic` 辅助方法，验证失败时可渲染诊断卡
+
 ### Changed
+- 项目对外展示名统一为 `WHai Image Station`（包名 `whai-image-station`、exe `WHai-image-station`），与 GitHub 仓库一致；数据目录与内部代码标识保持不变
 - 移除全部 `sys.path.insert` hack，配置为可安装包
 - 引入 ruff、pyright、pytest 工程化配置
 - 缩略图路径、header 解析、safe_int 提取到 `src/config/utils.py`
