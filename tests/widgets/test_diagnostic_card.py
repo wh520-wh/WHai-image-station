@@ -1,6 +1,8 @@
 import json
 import pytest
 
+from PySide6.QtWidgets import QLabel
+
 from src.adapters.errors import Category, Diagnostic, Field
 from src.widgets.components.diagnostic_card import DiagnosticCard
 
@@ -67,3 +69,18 @@ def test_card_long_original_collapses_by_default(qapp):
     assert not card.original_text.isVisible()
     card.toggle_original()
     assert card.original_text.isVisible()
+
+
+def test_card_redacted_field_displays_stars_in_ui(qapp):
+    diag = Diagnostic(
+        category=Category.AUTH,
+        fields=(Field(name="Authorization", value="sk-secret", issue="invalid", redact=True),),
+    )
+    card = DiagnosticCard(diag)
+    # Find the value label in the field rows
+    assert len(card.field_rows) == 1
+    row = card.field_rows[0]
+    labels = row.findChildren(QLabel)
+    # labels: [name_lbl, value_lbl, issue_lbl]
+    value_labels = [l for l in labels if "***" in l.text()]
+    assert len(value_labels) == 1, f"expected '***' in value labels, got: {[l.text() for l in labels]}"

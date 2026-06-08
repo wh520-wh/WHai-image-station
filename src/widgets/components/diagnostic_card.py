@@ -71,6 +71,7 @@ class DiagnosticCard(QFrame):
 
         self.hint_label = QLabel()
         self.hint_label.setWordWrap(True)
+        self.hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.hint_label.setStyleSheet(f"color: {COLORS['info']}; font-size: 11px;")
         layout.addWidget(self.hint_label)
 
@@ -115,7 +116,8 @@ class DiagnosticCard(QFrame):
             name_lbl = QLabel(f"{field.name}:")
             name_lbl.setStyleSheet(label_style("muted"))
             name_lbl.setMinimumWidth(96)
-            value_lbl = QLabel(field.value)
+            display_value = "***" if field.redact else field.value
+            value_lbl = QLabel(display_value)
             value_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
             value_lbl.setStyleSheet(f"color: {COLORS['text']}; font-size: 11px;")
             issue_lbl = QLabel(f"— {field.issue}" if field.issue else "")
