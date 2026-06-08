@@ -155,7 +155,7 @@ class StabilityAdapter(BaseAdapter):
                 success=False,
                 error=original,
                 raw_response={"diagnostic": self._build_failure_diagnostic(
-                    category, "", payload, original,
+                    category, url, payload, original,
                 )},
             )
 
