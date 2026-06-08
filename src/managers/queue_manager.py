@@ -7,6 +7,7 @@ from typing import Optional, Callable
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
 from src.adapters import get_adapter
+from src.adapters.errors import Diagnostic
 from src.config import constants, database
 from src.config.encryption import decrypt
 from src.config.utils import parse_headers, get_thumbnail_path
@@ -137,7 +138,12 @@ class QueueManager:
             else:
                 task.status = "FAILED"
                 task.error = result.error or "生成失败"
-            task.params["_diagnostic"] = (result.raw_response or {}).get("diagnostic", {})
+            raw_diag = (result.raw_response or {}).get("diagnostic")
+            if isinstance(raw_diag, Diagnostic):
+                task.params["_diagnostic"] = raw_diag
+            else:
+                # legacy dict or missing — wrap into a fresh Diagnostic
+                task.params["_diagnostic"] = Diagnostic.from_dict(raw_diag or {"original": task.error or ""})
 
             await self._save_history(task)
             self._notify(task, "completed" if task.status == "COMPLETED" else "failed")
@@ -235,11 +241,34 @@ class QueueManager:
         db = self._worker_db or self._db
         if not db or not hasattr(db, "save_generation_history"):
             return
-        # image_path 保持存第一张（兼容性）
         image_path = task.result_paths[0] if task.result_paths else None
-        # result_paths_json 存完整列表
         result_paths_json = task.result_paths
-        diagnostic = task.params.get("_diagnostic", {}) if isinstance(task.params, dict) else {}
+        raw_diag = task.params.get("_diagnostic") if isinstance(task.params, dict) else None
+        if isinstance(raw_diag, Diagnostic):
+            diagnostic_dict = raw_diag.to_dict()
+            request_url = next(
+                (f.value for f in raw_diag.fields if f.name == "URL"),
+                None,
+            )
+            request_payload = {
+                f.name.removeprefix("payload."): f.value
+                for f in raw_diag.fields
+                if f.name.startswith("payload.")
+            }
+            response_summary = (
+                f"[{raw_diag.category.value}] "
+                f"{raw_diag.original[:200] if raw_diag.original else ''}"
+            )
+        elif isinstance(raw_diag, dict):
+            diagnostic_dict = raw_diag
+            request_url = raw_diag.get("request_url")
+            request_payload = raw_diag.get("payload", {})
+            response_summary = raw_diag.get("response_summary")
+        else:
+            diagnostic_dict = {}
+            request_url = None
+            request_payload = {}
+            response_summary = None
         params = dict(task.params or {})
         params.pop("_diagnostic", None)
         try:
@@ -256,10 +285,10 @@ class QueueManager:
                 "result_paths_json": result_paths_json,
                 "status": task.status,
                 "error": task.error,
-                "request_url": diagnostic.get("request_url"),
-                "request_payload": diagnostic.get("payload", {}),
-                "response_summary": diagnostic.get("response_summary"),
-                "diagnostic": diagnostic,
+                "request_url": request_url,
+                "request_payload": request_payload,
+                "response_summary": response_summary,
+                "diagnostic": diagnostic_dict,
                 "created_at": task.created_at.isoformat(),
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             })

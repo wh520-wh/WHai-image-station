@@ -10,6 +10,7 @@ from src.config import constants
 from src.config.utils import get_thumbnail_path
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
+from src.adapters.errors import Category, Field, Diagnostic, AdapterError
 
 
 AUTH_PRESETS = {
@@ -82,6 +83,55 @@ class BaseAdapter(ABC):
             for key, value in (headers or {}).items()
         }
 
+    def report_error(
+        self,
+        category: Category,
+        *,
+        original: str = "",
+        fields: list[Field] | None = None,
+        hint: str | None = None,
+        source_id: str = "",
+    ) -> "AdapterError":
+        diagnostic = Diagnostic(
+            category=category,
+            fields=tuple(fields or ()),
+            hint=hint,
+            original=original,
+            platform=self.platform_id,
+            source_id=source_id,
+        )
+        return AdapterError(str(diagnostic), diagnostic)
+
+    @staticmethod
+    def classify_status(status_code: int) -> Category:
+        if status_code in (401, 403):
+            return Category.AUTH
+        if status_code == 429:
+            return Category.RATE_LIMIT
+        if 500 <= status_code < 600:
+            return Category.SERVER
+        if 400 <= status_code < 500:
+            return Category.BAD_REQUEST
+        return Category.UNKNOWN
+
+    @staticmethod
+    def classify_exception(exc: BaseException) -> Category:
+        if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException)):
+            return Category.NETWORK
+        return Category.UNKNOWN
+
+    @staticmethod
+    def hint_for_category(category: Category) -> str | None:
+        hints = {
+            Category.AUTH: "请检查设置中的 API Key 是否正确。",
+            Category.RATE_LIMIT: "请求频率超限，请稍后重试。",
+            Category.NETWORK: "网络问题：检查 Base URL、代理或中转站可用性。",
+            Category.SERVER: "服务器错误，请稍后重试。",
+            Category.BAD_REQUEST: "请求参数不合法，请检查尺寸/质量等参数。",
+            Category.CONTENT: "响应内容无法解析，请检查响应格式设置或模型兼容性。",
+            Category.UNKNOWN: "请复制诊断发给开发者。",
+        }
+        return hints.get(category)
 
     def build_url(self, base_url: str, path: str, config: Optional[PlatformConfig] = None) -> str:
         """Join API base URL and endpoint path for relay/proxy compatibility.

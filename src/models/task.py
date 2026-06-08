@@ -3,6 +3,9 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
+# NOTE: task.params['_diagnostic'] holds a Diagnostic object (src.adapters.errors.Diagnostic)
+# in live tasks, or a dict in legacy history records. Adapters and QueueManager populate it.
+
 
 @dataclass
 class GenerationTask:
@@ -12,7 +15,7 @@ class GenerationTask:
     model_config_id: str = ""
     prompt: str = ""
     negative_prompt: str = ""
-    params: dict = field(default_factory=dict)
+    params: "dict[str, object]" = field(default_factory=dict)
     reference_image_path: Optional[str] = None
     status: str = "WAITING"
     result_paths: list = field(default_factory=list)

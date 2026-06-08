@@ -5,6 +5,7 @@ import httpx
 import base64
 from datetime import datetime
 
+from src.adapters.errors import Category, Field, Diagnostic
 from src.models.task import GenerationTask
 from src.models.platform_config import PlatformConfig
 from src.config import constants
@@ -109,6 +110,7 @@ class MidjourneyAdapter(BaseAdapter):
             "webhook_secret": None,
         }
 
+        url: str = ""
         try:
             client = self.get_http_client(config)
             headers = self.build_headers(config)
@@ -140,7 +142,47 @@ class MidjourneyAdapter(BaseAdapter):
 
             return GenerationResult(success=True, image_paths=[save_path], raw_response=data)
 
-        except httpx.HTTPStatusError as e:
-            return GenerationResult(success=False, error=f"HTTP错误: {e.response.status_code} - {e.response.text}")
-        except Exception as e:
-            return GenerationResult(success=False, error=f"生成失败: {str(e)}")
+        except httpx.HTTPStatusError as exc:
+            original = f"HTTP错误 {exc.response.status_code}: {exc.response.text}"
+            category = self.classify_status(exc.response.status_code)
+            return GenerationResult(
+                success=False,
+                error=original,
+                raw_response={"diagnostic": self._build_failure_diagnostic(
+                    category, url, payload, original, exc.response.status_code,
+                )},
+            )
+        except Exception as exc:
+            original = f"生成失败: {exc}"
+            category = self.classify_exception(exc)
+            return GenerationResult(
+                success=False,
+                error=original,
+                raw_response={"diagnostic": self._build_failure_diagnostic(
+                    category, url, payload, original,
+                )},
+            )
+
+    def _build_failure_diagnostic(
+        self,
+        category: Category,
+        url: str,
+        payload: dict,
+        original: str,
+        status_code: int | None = None,
+    ) -> Diagnostic:
+        fields: list[Field] = []
+        if url:
+            fields.append(Field(name="URL", value=url, issue="请求地址"))
+        if status_code is not None:
+            fields.append(Field(name="HTTP status", value=str(status_code), issue="响应状态码"))
+        prompt_value = (payload or {}).get("prompt", "")
+        if prompt_value:
+            fields.append(Field(name="payload.prompt", value=str(prompt_value)[:200], issue="请求参数"))
+        return Diagnostic(
+            category=category,
+            fields=tuple(fields),
+            hint=self.hint_for_category(category),
+            original=original,
+            platform=self.platform_id,
+        )

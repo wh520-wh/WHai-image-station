@@ -262,17 +262,17 @@ def test_generation_panel_show_diagnostic_history_renders_records():
 
 
 def test_generation_panel_diagnostic_view_keeps_full_copyable_text():
+    from src.adapters.errors import Diagnostic
     panel = GenerationPanel(None)
     diagnostic = {
-        "request_url": "https://relay.example/codex/v1/images/generations",
-        "payload": {"prompt": "x" * 220, "model": "gpt-image-2"},
-        "error": "timeout " * 80,
+        "category": "unknown",
+        "original": "timeout " * 80,
+        "fields": [{"name": "URL", "value": "https://relay.example/codex/v1/images/generations", "issue": "请求地址"}],
+        "platform": "openai",
     }
 
     panel.update_diagnostic(diagnostic, expand=True)
 
-    assert isinstance(panel.diagnostic_label, QTextEdit)
-    assert panel.diagnostic_label.isReadOnly() is True
-    assert panel.diagnostic_label.lineWrapMode() == QTextEdit.WidgetWidth
-    assert panel.diagnostic_label.wordWrapMode() == QTextOption.WrapAnywhere
-    assert panel.diagnostic_label.toPlainText() == panel._diagnostic_text()
+    # After T9, the diagnostic panel uses DiagnosticCard, not QTextEdit
+    assert panel.diagnostic_card_frame is not None
+    assert isinstance(panel.diagnostic_card_frame._diagnostic, Diagnostic)

@@ -15,9 +15,11 @@ from PySide6.QtGui import QFont
 import json
 
 from src.adapters import get_adapter
+from src.adapters.errors import Category, Diagnostic
 from src.config import constants, encryption
 from src.config.utils import parse_headers, safe_int
 from src.models.platform_config import PlatformConfig
+from src.widgets.components.diagnostic_card import DiagnosticCard
 from src.widgets.theme import COLORS, RADIUS, SPACING, app_font, apply_card_style, button_style, input_style, label_style, tab_style
 
 
@@ -89,6 +91,11 @@ class SettingsDialog(QDialog):
         button_box.accepted.connect(self._save)
         button_box.rejected.connect(self.reject)
         root.addWidget(button_box)
+
+        self.validation_card: DiagnosticCard | None = None
+        self.validation_card_container = QVBoxLayout()
+        self.validation_card_container.setContentsMargins(0, 0, 0, 0)
+        root.addLayout(self.validation_card_container)
 
         self.source_tab = QWidget()
         self.tabs.addTab(self.source_tab, "来源与模型")
@@ -588,6 +595,20 @@ class SettingsDialog(QDialog):
         item = self.model_table.item(row, col)
         return item.text().strip() if item else ""
 
+    def _show_validation_diagnostic(self, diagnostic: Diagnostic):
+        if self.validation_card is not None:
+            self.validation_card.setParent(None)
+            self.validation_card.deleteLater()
+            self.validation_card = None
+        self.validation_card = DiagnosticCard(diagnostic, parent=self)
+        self.validation_card_container.addWidget(self.validation_card)
+
+    def _clear_validation_diagnostic(self):
+        if self.validation_card is not None:
+            self.validation_card.setParent(None)
+            self.validation_card.deleteLater()
+            self.validation_card = None
+
     def _build_generation_url_preview(self, platform_id: str, base_url: str) -> str:
         adapter_key = "openai" if platform_id == "openai_images" else platform_id
         adapter = get_adapter(adapter_key)
@@ -658,7 +679,7 @@ class SettingsDialog(QDialog):
         }
 
     def _backup_config(self):
-        path, _ = QFileDialog.getSaveFileName(self, "备份配置", "imageMaker-sources.json", "JSON 文件 (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "备份配置", "WHai-image-station-sources.json", "JSON 文件 (*.json)")
         if not path:
             return
         with open(path, "w", encoding="utf-8") as file:
@@ -718,7 +739,7 @@ class SettingsDialog(QDialog):
     def _on_export(self):
         """Handle export button click"""
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出数据", "imageMaker-backup.imbackup", "备份文件 (*.imbackup)"
+            self, "导出数据", "WHai-image-station-backup.imbackup", "备份文件 (*.imbackup)"
         )
         if not path:
             return
