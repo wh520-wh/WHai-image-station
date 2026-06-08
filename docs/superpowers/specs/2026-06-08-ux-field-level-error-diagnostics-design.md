@@ -58,7 +58,13 @@ class Field:
     name: str
     value: str
     issue: str
-    redact: bool = False  # True 时序列化输出 "***"
+    redact: bool = False  # True 时 to_dict 输出 "***"
+
+    def to_dict(self) -> dict: ...
+    @classmethod
+    def from_dict(cls, d: dict) -> "Field":
+        # 缺 name/value/issue → 走 UNKNOWN 风格兜底，绝不抛
+        ...
 
 @dataclass(frozen=True)
 class Diagnostic:
