@@ -1,4 +1,4 @@
-# imageMaker 开发文档
+# WHai Image Station 开发文档
 
 ## 环境搭建
 
@@ -9,7 +9,7 @@
 ### 步骤
 ```bash
 # 1. 克隆代码
-git clone <repo-url> && cd imageMaker
+git clone https://github.com/wh520-wh/WHai-image-station.git && cd WHai-image-station
 
 # 2. 创建虚拟环境
 python -m venv .venv

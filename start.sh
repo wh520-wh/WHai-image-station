@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo
-echo "  imageMaker - AI Image Generator"
+echo "  WHai Image Station - AI Image Generator"
 echo "  -------------------------------"
 echo
 
@@ -29,6 +29,6 @@ if [ ! -f ".venv/.deps_installed" ]; then
     touch .venv/.deps_installed
 fi
 
-echo "[INFO] Starting imageMaker..."
+echo "[INFO] Starting WHai Image Station..."
 echo
 python src/main.py

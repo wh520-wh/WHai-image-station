@@ -1,4 +1,4 @@
-# imageMaker
+# WHai Image Station
 
 轻量化桌面端图片生成工具，支持多平台 API 聚合（DALL·E、Stable Diffusion、Midjourney）。
 
@@ -36,7 +36,7 @@ pip install pyinstaller
 python build.py
 ```
 
-输出: `dist/imageMaker.exe`
+输出: `dist/WHai-image-station.exe`
 
 ## 配置
 
@@ -52,7 +52,7 @@ python build.py
 ## 目录结构
 
 ```
-imageMaker/
+WHai-image-station/
 ├── src/
 │   ├── main.py              # 入口
 │   ├── app.py               # 应用初始化

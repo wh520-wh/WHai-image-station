@@ -101,7 +101,7 @@ def main():
             QMessageBox.warning(
                 None,
                 constants.APP_NAME,
-                "imageMaker 已在运行中，请勿重复启动。",
+                "WHai Image Station 已在运行中，请勿重复启动。",
             )
             return 1
     app = ImageMakerApp(sys.argv)

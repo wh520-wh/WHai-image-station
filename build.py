@@ -16,7 +16,7 @@ def build_exe():
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--name=imageMaker",
+        "--name=WHai-image-station",
         "--onefile",
         "--windowed",
         "--clean",
@@ -40,7 +40,7 @@ def build_exe():
     result = subprocess.run(cmd, cwd=project_root, env=build_env)
     if result.returncode == 0:
         print("打包成功！")
-        print("输出目录: dist/imageMaker.exe")
+        print("输出目录: dist/WHai-image-station.exe")
     else:
         print("打包失败！")
         sys.exit(1)

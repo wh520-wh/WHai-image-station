@@ -1,6 +1,6 @@
 import os
 
-APP_NAME = "imageMaker"
+APP_NAME = "WHai Image Station"
 APP_VERSION = "1.0.0"
 
 USER_HOME = os.path.expanduser("~")

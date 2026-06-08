@@ -2,8 +2,8 @@
 
 ## 报告 Bug
 
-在 [GitHub Issues](https://github.com/your-org/imageMaker/issues) 提交，请包含：
-- imageMaker 版本
+在 [GitHub Issues](https://github.com/wh520-wh/WHai-image-station/issues) 提交，请包含：
+- WHai Image Station 版本
 - 操作系统和版本
 - 复现步骤
 - 期望行为 vs 实际行为

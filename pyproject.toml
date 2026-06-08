@@ -1,5 +1,5 @@
 [project]
-name = "image-maker"
+name = "whai-image-station"
 version = "1.0.0"
 description = "轻量化桌面端图片生成工具"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ dev = [
 ]
 
 [project.scripts]
-image-maker = "src.main:main"
+whai-image-station = "src.main:main"
 
 [build-system]
 requires = ["hatchling"]

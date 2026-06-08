@@ -1,10 +1,10 @@
 @echo off
-title imageMaker
+title WHai Image Station
 
 cd /d "%~dp0"
 
 echo.
-echo   imageMaker - AI Image Generator
+echo   WHai Image Station - AI Image Generator
 echo   -------------------------------
 echo.
 
@@ -45,7 +45,7 @@ if not exist ".venv\.deps_installed" (
     type nul > ".venv\.deps_installed"
 )
 
-echo [INFO] Starting imageMaker...
+echo [INFO] Starting WHai Image Station...
 echo.
 python src\main.py
 
