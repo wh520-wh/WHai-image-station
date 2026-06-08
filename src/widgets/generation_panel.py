@@ -5,13 +5,15 @@ from PySide6.QtWidgets import (
     QSizePolicy, QScrollArea,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextOption
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
 
 import os
 import json
 
 from src.adapters import get_all_adapters
+from src.adapters.errors import Diagnostic
 from src.widgets.components.prompt_card import TaskCard
+from src.widgets.components.diagnostic_card import DiagnosticCard
 from src.widgets.theme import (
     COLORS, SPACING, app_font, apply_card_style, button_style, input_style,
     label_style, scroll_area_style, tab_style
@@ -36,7 +38,7 @@ class GenerationPanel(QWidget):
         self.models_by_source: dict[str, list[dict]] = {}
         self.current_source_id = ""
         self.current_model_id = ""
-        self.last_diagnostic: dict = {}
+        self.last_diagnostic: Diagnostic | None = None
         self.adapters = {}
         self.reference_image_path = None
         self.platform_configured: dict[str, bool] = {}
@@ -306,23 +308,11 @@ class GenerationPanel(QWidget):
         diagnostic_title.setStyleSheet(label_style("section"))
         diagnostic_header.addWidget(diagnostic_title)
         diagnostic_header.addStretch()
-        copy_diagnostic_btn = QPushButton("复制诊断")
-        copy_diagnostic_btn.setStyleSheet(button_style("ghost"))
-        copy_diagnostic_btn.clicked.connect(self._copy_diagnostic)
-        diagnostic_header.addWidget(copy_diagnostic_btn)
         diagnostic_layout.addLayout(diagnostic_header)
-        self.diagnostic_label = QTextEdit()
-        self.diagnostic_label.setReadOnly(True)
-        self.diagnostic_label.setPlainText("暂无诊断信息")
-        self.diagnostic_label.setMinimumHeight(180)
-        self.diagnostic_label.setMaximumHeight(360)
-        self.diagnostic_label.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.diagnostic_label.setWordWrapMode(QTextOption.WrapAnywhere)
-        self.diagnostic_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
-        )
-        self.diagnostic_label.setStyleSheet(input_style())
-        diagnostic_layout.addWidget(self.diagnostic_label)
+        self.diagnostic_card_frame: DiagnosticCard | None = None
+        self.diagnostic_card_container = QVBoxLayout()
+        self.diagnostic_card_container.setContentsMargins(0, 0, 0, 0)
+        diagnostic_layout.addLayout(self.diagnostic_card_container)
         self.diagnostic_history_container = QWidget()
         self.diagnostic_history_layout = QVBoxLayout(self.diagnostic_history_container)
         self.diagnostic_history_layout.setContentsMargins(0, 0, 0, 0)
@@ -644,25 +634,30 @@ class GenerationPanel(QWidget):
                     self.model_combo.setCurrentIndex(model_index)
         self.show_status("\u6a21\u677f\u5185\u5bb9\u5df2\u586b\u5165\u751f\u6210\u533a\u3002", "success")
 
-    def update_diagnostic(self, diagnostic: dict, expand: bool = False):
-        self.last_diagnostic = diagnostic or {}
-        if not self.last_diagnostic:
-            self.diagnostic_label.setPlainText("暂无诊断信息")
+    def update_diagnostic(self, diagnostic: Diagnostic | dict | None, expand: bool = False):
+        if isinstance(diagnostic, dict):
+            self.last_diagnostic = Diagnostic.from_dict(diagnostic) if diagnostic else None
+        else:
+            self.last_diagnostic = diagnostic
+        self._render_diagnostic_card()
+        if self.last_diagnostic is None:
+            self.diagnostic_frame.setVisible(False)
             return
-        self.diagnostic_label.setPlainText(self._diagnostic_text())
         if expand:
             self.diagnostic_frame.setVisible(True)
 
+    def _render_diagnostic_card(self):
+        if self.diagnostic_card_frame is not None:
+            self.diagnostic_card_frame.setParent(None)
+            self.diagnostic_card_frame.deleteLater()
+            self.diagnostic_card_frame = None
+        if self.last_diagnostic is None:
+            return
+        self.diagnostic_card_frame = DiagnosticCard(self.last_diagnostic, parent=self.diagnostic_frame)
+        self.diagnostic_card_container.addWidget(self.diagnostic_card_frame)
+
     def _toggle_diagnostic_panel(self):
         self.diagnostic_frame.setVisible(not self.diagnostic_frame.isVisible())
-
-    def _copy_diagnostic(self):
-        QApplication.clipboard().setText(self._diagnostic_text())
-
-    def _diagnostic_text(self) -> str:
-        if not self.last_diagnostic:
-            return "暂无诊断信息"
-        return json.dumps(self.last_diagnostic, ensure_ascii=False, indent=2)
 
     def show_diagnostic_history(self, records: list[dict]):
         """显示历史诊断记录列表，最多 8 条。"""
@@ -677,39 +672,17 @@ class GenerationPanel(QWidget):
 
         self.diagnostic_frame.setVisible(True)
         for record in records[:8]:
-            frame = QFrame()
-            frame.setMinimumHeight(70)
-            apply_card_style(frame, COLORS["panel_alt"])
-            layout = QVBoxLayout(frame)
-            layout.setContentsMargins(SPACING['sm'], SPACING['sm'], SPACING['sm'], SPACING['sm'])
-            layout.setSpacing(SPACING['xs'])
-
-            header = QHBoxLayout()
-            prompt = record.get("prompt") or "诊断记录"
-            title = QLabel(prompt[:28] + ("..." if len(prompt) > 28 else ""))
-            title.setStyleSheet(label_style("section"))
-            header.addWidget(title)
-            header.addStretch()
-            copy_btn = QPushButton("复制")
-            copy_btn.setMinimumWidth(40)
-            copy_btn.setStyleSheet(button_style("ghost"))
-            copy_btn.clicked.connect(lambda checked=False, r=record: self._copy_single_diagnostic(r))
-            header.addWidget(copy_btn)
-            layout.addLayout(header)
-
-            error = record.get("error") or record.get("diagnostic", {}).get("error") or record.get("diagnostic", {}).get("status") or "暂无错误详情"
-            error_label = QLabel(str(error)[:80] + ("..." if len(str(error)) > 80 else ""))
-            error_label.setWordWrap(True)
-            error_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px;")
-            layout.addWidget(error_label)
-
-            self.diagnostic_history_layout.addWidget(frame)
+            diag_obj = Diagnostic.from_dict(record.get("diagnostic") or record)
+            card = DiagnosticCard(diag_obj, parent=self.diagnostic_history_container)
+            self.diagnostic_history_layout.addWidget(card)
 
         self.diagnostic_history_layout.addStretch()
         self.diagnostic_history_container.setVisible(True)
 
     def _copy_single_diagnostic(self, record: dict):
-        QApplication.clipboard().setText(json.dumps(record.get("diagnostic", record), ensure_ascii=False, indent=2))
+        QApplication.clipboard().setText(
+            json.dumps(Diagnostic.from_dict(record.get("diagnostic") or record).to_dict(), ensure_ascii=False, indent=2)
+        )
 
     def _clear_completed(self):
         self.queue_manager.clear_completed()
