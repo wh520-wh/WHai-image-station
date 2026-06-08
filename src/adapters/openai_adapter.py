@@ -111,8 +111,8 @@ class OpenAIAdapter(BaseAdapter):
             if not image_refs:
                 original = f"响应格式不匹配：当前使用「{config.response_format}」解析，未提取到图片。请检查设置的响应格式选项。原始响应: {str(data)[:500]}"
                 diagnostic = self._build_diagnostic(
-                    Category.CONTENT, generation_url, headers, payload, duration_ms,
-                    source_info, model_info, original,
+                    Category.CONTENT, generation_url, payload, duration_ms,
+                    source_info, original,
                 )
                 return GenerationResult(
                     success=False,
@@ -138,9 +138,8 @@ class OpenAIAdapter(BaseAdapter):
                 self._create_thumbnail(save_path)
 
             diagnostic = self._build_diagnostic(
-                Category.UNKNOWN, generation_url, headers, payload, duration_ms,
-                source_info, model_info, original=None,
-                response_summary=f"返回 {len(image_paths)} 张图片",
+                Category.UNKNOWN, generation_url, payload, duration_ms,
+                source_info, original=None,
             )
             return GenerationResult(
                 success=True,
@@ -152,8 +151,8 @@ class OpenAIAdapter(BaseAdapter):
             original = self.format_http_status_error(exc)
             category = self.classify_status(exc.response.status_code)
             diagnostic = self._build_diagnostic(
-                category, generation_url, headers, payload, duration_ms,
-                source_info, model_info, original,
+                category, generation_url, payload, duration_ms,
+                source_info, original,
                 status_code=exc.response.status_code,
             )
             return GenerationResult(
@@ -164,10 +163,10 @@ class OpenAIAdapter(BaseAdapter):
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             original = self.format_generation_exception(exc, generation_url, payload)
-            category = self._classify_exception(exc)
+            category = self.classify_exception(exc)
             diagnostic = self._build_diagnostic(
-                category, generation_url, headers, payload, duration_ms,
-                source_info, model_info, original,
+                category, generation_url, payload, duration_ms,
+                source_info, original,
             )
             return GenerationResult(
                 success=False,
@@ -179,14 +178,11 @@ class OpenAIAdapter(BaseAdapter):
         self,
         category: Category,
         url: str,
-        headers: dict,
         payload: dict,
         duration_ms: int,
         source_info: dict,
-        model_info: dict,
         original: str | None,
         status_code: int | None = None,
-        response_summary: str | None = None,
     ) -> Diagnostic:
         fields: list[Field] = []
         fields.append(Field(name="URL", value=url, issue="请求地址"))
@@ -199,30 +195,11 @@ class OpenAIAdapter(BaseAdapter):
         return Diagnostic(
             category=category,
             fields=tuple(fields),
-            hint=self._hint_for(category),
+            hint=self.hint_for_category(category),
             original=original or "",
             platform=self.platform_id,
             source_id=source_info.get("name", ""),
         )
-
-    @staticmethod
-    def _classify_exception(exc: Exception) -> Category:
-        if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException)):
-            return Category.NETWORK
-        return Category.UNKNOWN
-
-    @staticmethod
-    def _hint_for(category: Category) -> str | None:
-        hints = {
-            Category.AUTH: "请检查设置中的 API Key 是否正确。",
-            Category.RATE_LIMIT: "请求频率超限，请稍后重试。",
-            Category.NETWORK: "网络问题：检查 Base URL、代理或中转站可用性。",
-            Category.SERVER: "服务器错误，请稍后重试。",
-            Category.BAD_REQUEST: "请求参数不合法，请检查尺寸/质量等参数。",
-            Category.CONTENT: "响应内容无法解析，请检查响应格式设置或模型兼容性。",
-            Category.UNKNOWN: "请复制诊断发给开发者。",
-        }
-        return hints.get(category)
 
     def _extract_image_refs(self, data: dict, response_format: str = "openai") -> list[str]:
         """按指定的响应格式提取图片 URL/base64 列表。"""

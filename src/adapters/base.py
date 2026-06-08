@@ -114,6 +114,25 @@ class BaseAdapter(ABC):
             return Category.BAD_REQUEST
         return Category.UNKNOWN
 
+    @staticmethod
+    def classify_exception(exc: BaseException) -> Category:
+        if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException)):
+            return Category.NETWORK
+        return Category.UNKNOWN
+
+    @staticmethod
+    def hint_for_category(category: Category) -> str | None:
+        hints = {
+            Category.AUTH: "请检查设置中的 API Key 是否正确。",
+            Category.RATE_LIMIT: "请求频率超限，请稍后重试。",
+            Category.NETWORK: "网络问题：检查 Base URL、代理或中转站可用性。",
+            Category.SERVER: "服务器错误，请稍后重试。",
+            Category.BAD_REQUEST: "请求参数不合法，请检查尺寸/质量等参数。",
+            Category.CONTENT: "响应内容无法解析，请检查响应格式设置或模型兼容性。",
+            Category.UNKNOWN: "请复制诊断发给开发者。",
+        }
+        return hints.get(category)
+
     def build_url(self, base_url: str, path: str, config: Optional[PlatformConfig] = None) -> str:
         """Join API base URL and endpoint path for relay/proxy compatibility.
         当 interface_type 为 'custom' 时，base_url 将直接作为完整请求地址，不追加 path。
