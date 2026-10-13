@@ -1,10 +1,19 @@
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QFileDialog, QFrame
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QFont, QTransform, QGuiApplication
-
 import os
 
-from src.widgets.theme import COLORS, SPACING, RADIUS, app_font, apply_card_style, button_style, label_style, scroll_area_style
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QGuiApplication, QPixmap, QTransform
+from PySide6.QtWidgets import QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout
+
+from src.widgets.theme import (
+    COLORS,
+    RADIUS,
+    SPACING,
+    app_font,
+    apply_card_style,
+    button_style,
+    label_style,
+    scroll_area_style,
+)
 
 
 class ImageViewer(QDialog):
@@ -30,7 +39,7 @@ class ImageViewer(QDialog):
         top_bar = QHBoxLayout()
         title_text = self.record.get("prompt", "图片预览") or "图片预览"
         title = QLabel(title_text[:64] + ("..." if len(title_text) > 64 else ""))
-        title.setFont(app_font(14, QFont.Bold))
+        title.setFont(app_font(14, QFont.Weight.Bold))
         title.setStyleSheet(label_style("title"))
         top_bar.addWidget(title)
         top_bar.addStretch()
@@ -50,20 +59,20 @@ class ImageViewer(QDialog):
                     stop:0 #DDF7FC,
                     stop:0.55 #FFF8EC,
                     stop:1 #FFE2C8);
-                border: 1px solid {COLORS['border_strong']};
-                border-radius: {RADIUS['card']}px;
+                border: 1px solid {COLORS["border_strong"]};
+                border-radius: {RADIUS["card"]}px;
             }}
         """)
         image_layout = QVBoxLayout(image_frame)
-        image_layout.setContentsMargins(*(SPACING['sm'],)*4)
+        image_layout.setContentsMargins(*(SPACING["sm"],) * 4)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setStyleSheet(scroll_area_style())
 
         self.image_label = QLabel("图片不存在或尚未加载")
-        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet(f"color: {COLORS['border_strong']}; font-size: 13px;")
         self.scroll_area.setWidget(self.image_label)
         image_layout.addWidget(self.scroll_area)
@@ -72,8 +81,8 @@ class ImageViewer(QDialog):
         bottom_frame = QFrame()
         apply_card_style(bottom_frame)
         bottom_bar = QHBoxLayout(bottom_frame)
-        bottom_bar.setContentsMargins(*(SPACING['md'],)*4)
-        bottom_bar.setSpacing(SPACING['sm'])
+        bottom_bar.setContentsMargins(*(SPACING["md"],) * 4)
+        bottom_bar.setSpacing(SPACING["sm"])
 
         zoom_out_btn = QPushButton("−")
         zoom_out_btn.setFixedSize(36, 36)
@@ -97,7 +106,7 @@ class ImageViewer(QDialog):
         bottom_bar.addWidget(original_btn)
 
         self.zoom_label = QLabel("100%")
-        self.zoom_label.setAlignment(Qt.AlignCenter)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_label.setStyleSheet(label_style("section"))
         self.zoom_label.setFixedWidth(56)
         bottom_bar.addWidget(self.zoom_label)
@@ -155,8 +164,8 @@ class ImageViewer(QDialog):
                 scaled = transformed.scaled(
                     max(1, viewport.width() - 24),
                     max(1, viewport.height() - 24),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
                 self.current_scale = min(
                     scaled.width() / transformed.width() if transformed.width() else 1,
@@ -166,8 +175,8 @@ class ImageViewer(QDialog):
                 scaled = transformed.scaled(
                     int(transformed.width() * self.current_scale),
                     int(transformed.height() * self.current_scale),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
             self.image_label.setPixmap(scaled)
             self.image_label.setText("")
@@ -204,9 +213,7 @@ class ImageViewer(QDialog):
     def _save_as(self):
         if not self.original_pixmap:
             return
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, "保存图片", "", "图片文件 (*.png *.jpg *.jpeg)"
-        )
+        save_path, _ = QFileDialog.getSaveFileName(self, "保存图片", "", "图片文件 (*.png *.jpg *.jpeg)")
         if save_path:
             self.original_pixmap.save(save_path)
 

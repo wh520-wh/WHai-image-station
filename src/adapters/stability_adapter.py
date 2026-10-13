@@ -1,14 +1,15 @@
-from .base import BaseAdapter, GenerationResult
-
 import base64
 import os
-import httpx
 from datetime import datetime
 
-from src.adapters.errors import Category, Field, Diagnostic
-from src.models.task import GenerationTask
-from src.models.platform_config import PlatformConfig
+import httpx
+
+from src.adapters.errors import Category, Diagnostic, Field
 from src.config import constants
+from src.models.platform_config import PlatformConfig
+from src.models.task import GenerationTask
+
+from .base import BaseAdapter, GenerationResult
 
 
 class StabilityAdapter(BaseAdapter):
@@ -55,11 +56,25 @@ class StabilityAdapter(BaseAdapter):
                 "type": "select",
                 "label": "风格预设",
                 "options": [
-                    "none", "3d-model", "analog-film", "anime", "cinematic",
-                    "comic-book", "digital-art", "enhance", "fantasy-art",
-                    "isometric", "line-art", "low-poly", "modeling-compound",
-                    "neon-punk", "origami", "photographic", "pixel-art",
-                    "texture", "tileable",
+                    "none",
+                    "3d-model",
+                    "analog-film",
+                    "anime",
+                    "cinematic",
+                    "comic-book",
+                    "digital-art",
+                    "enhance",
+                    "fantasy-art",
+                    "isometric",
+                    "line-art",
+                    "low-poly",
+                    "modeling-compound",
+                    "neon-punk",
+                    "origami",
+                    "photographic",
+                    "pixel-art",
+                    "texture",
+                    "tileable",
                 ],
                 "default": "none",
             },
@@ -126,10 +141,7 @@ class StabilityAdapter(BaseAdapter):
             for i, artifact in enumerate(artifacts):
                 if artifact.get("base64"):
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    save_path = os.path.join(
-                        constants.GENERATIONS_DIR,
-                        f"{task.id}_{i+1}_{timestamp}.png"
-                    )
+                    save_path = os.path.join(constants.GENERATIONS_DIR, f"{task.id}_{i + 1}_{timestamp}.png")
                     img_bytes = base64.b64decode(artifact["base64"])
                     with open(save_path, "wb") as f:
                         f.write(img_bytes)
@@ -144,9 +156,15 @@ class StabilityAdapter(BaseAdapter):
             return GenerationResult(
                 success=False,
                 error=original,
-                raw_response={"diagnostic": self._build_failure_diagnostic(
-                    category, url, payload, original, exc.response.status_code,
-                )},
+                raw_response={
+                    "diagnostic": self._build_failure_diagnostic(
+                        category,
+                        url,
+                        payload,
+                        original,
+                        exc.response.status_code,
+                    )
+                },
             )
         except Exception as exc:
             original = f"生成失败: {exc}"
@@ -154,9 +172,14 @@ class StabilityAdapter(BaseAdapter):
             return GenerationResult(
                 success=False,
                 error=original,
-                raw_response={"diagnostic": self._build_failure_diagnostic(
-                    category, url, payload, original,
-                )},
+                raw_response={
+                    "diagnostic": self._build_failure_diagnostic(
+                        category,
+                        url,
+                        payload,
+                        original,
+                    )
+                },
             )
 
     def _build_failure_diagnostic(

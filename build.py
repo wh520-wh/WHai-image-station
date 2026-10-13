@@ -1,49 +1,30 @@
-"""
-PyInstaller 打包脚本
-使用方式: python build.py
-"""
+"""Build the portable Windows app using the single maintained spec."""
+
 import os
-import sys
 import subprocess
+import sys
+from pathlib import Path
+
 
 def build_exe():
-    """打包为单个 exe 文件"""
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    src_dir = os.path.join(project_root, "src")
-    build_env = os.environ.copy()
-    if os.name == "nt" and not build_env.get("USERPROFILE"):
-        build_env["USERPROFILE"] = project_root
+    root = Path(__file__).resolve().parent
+    environment = os.environ.copy()
+    if os.name == "nt":
+        # Prefer the interpreter and Windows DLLs over unrelated tools on PATH.
+        system = Path(environment.get("SystemRoot", "C:/Windows")) / "System32"
+        environment["PATH"] = os.pathsep.join(
+            [str(Path(sys.executable).parent), str(Path(sys.base_prefix)), str(system), environment.get("PATH", "")]
+        )
+    result = subprocess.run(
+        [sys.executable, "-m", "PyInstaller", "--noconfirm", "WHai-image-station.spec"],
+        cwd=root,
+        env=environment,
+    )
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    name = "WHai-image-station-debug" if environment.get("WHAI_CONSOLE_BUILD") == "1" else "WHai-image-station"
+    print(f"Ready: dist/{name}/{name}.exe")
 
-    cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--name=WHai-image-station",
-        "--onefile",
-        "--windowed",
-        "--clean",
-        "--noconfirm",
-        f"--add-data={src_dir};src",
-        "--hidden-import=PySide6",
-        "--hidden-import=httpx",
-        "--hidden-import=PIL",
-        "--hidden-import=cryptography",
-        "--hidden-import=aiosqlite",
-        "--exclude-module=setuptools",
-        "--exclude-module=pkg_resources",
-        "--exclude-module=pygame",
-        "--exclude-module=yt_dlp",
-        os.path.join(src_dir, "main.py"),
-    ]
-
-    print("开始打包...")
-    print("命令:", " ".join(cmd))
-
-    result = subprocess.run(cmd, cwd=project_root, env=build_env)
-    if result.returncode == 0:
-        print("打包成功！")
-        print("输出目录: dist/WHai-image-station.exe")
-    else:
-        print("打包失败！")
-        sys.exit(1)
 
 if __name__ == "__main__":
     build_exe()

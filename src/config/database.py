@@ -1,28 +1,47 @@
-import aiosqlite
+import asyncio
 import json
-import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
+
+import aiosqlite
+
 from ..config import constants
 
-ALLOWED_UPDATE_COLUMNS = frozenset({
-    "status", "error", "image_path", "thumbnail_path",
-    "completed_at", "result_paths_json", "diagnostic",
-    "response_summary",
-})
+ALLOWED_UPDATE_COLUMNS = frozenset(
+    {
+        "status",
+        "error",
+        "image_path",
+        "thumbnail_path",
+        "completed_at",
+        "result_paths_json",
+        "diagnostic",
+        "response_summary",
+    }
+)
 
 
 class Database:
     _instance: Optional["Database"] = None
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = db_path or constants.DEFAULT_DB_PATH
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
+        self._transaction_depth = 0
+        self._transaction_owner: asyncio.Task | None = None
+        self._access_lock = asyncio.Lock()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def connection(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            raise RuntimeError("Database is not connected")
+        return self._conn
+
     @classmethod
-    def get_instance(cls, db_path: Optional[str] = None) -> "Database":
+    def get_instance(cls, db_path: str | None = None) -> "Database":
         if cls._instance is None:
             cls._instance = cls(db_path)
         return cls._instance
@@ -30,17 +49,18 @@ class Database:
     async def connect(self):
         if self._conn is None:
             self._conn = await aiosqlite.connect(self.db_path)
-            await self._conn.execute("PRAGMA journal_mode=WAL")
-            await self._conn.execute("PRAGMA cache_size=-8000")
+            await self.connection.execute("PRAGMA journal_mode=WAL")
+            await self.connection.execute("PRAGMA cache_size=-8000")
+            await self.connection.execute("PRAGMA busy_timeout=5000")
             await self._init_tables()
 
     async def _init_tables(self):
-        cursor = await self._conn.execute("PRAGMA user_version")
+        cursor = await self.connection.execute("PRAGMA user_version")
         row = await cursor.fetchone()
         current_version = row[0] if row else 0
 
         if current_version == 0:
-            await self._conn.executescript("""
+            await self.connection.executescript("""
                 CREATE TABLE IF NOT EXISTS prompt_templates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -123,10 +143,10 @@ class Database:
             await self._ensure_column("generation_history", "category", "TEXT")
             await self._ensure_column("generation_history", "tags", "TEXT")
             await self._ensure_column("source_models", "reference_image_enabled", "INTEGER DEFAULT 0")
-            await self._conn.execute(
+            await self.connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_created_at ON generation_history(created_at DESC)"
             )
-            await self._conn.execute(
+            await self.connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_task_id ON generation_history(task_id)"
             )
             await self.migrate_legacy_openai_config()
@@ -134,33 +154,68 @@ class Database:
         if current_version < 2:
             await self._migrate_to_v2()
 
-        target_version = 2
+        if current_version < 3:
+            await self._migrate_to_v3()
+
+        target_version = 3
         if current_version < target_version:
-            await self._conn.execute(f"PRAGMA user_version = {target_version}")
-            await self._conn.commit()
+            await self.connection.execute(f"PRAGMA user_version = {target_version}")
+            await self.connection.commit()
 
     async def _ensure_column(self, table_name: str, column_name: str, column_type: str):
-        cursor = await self._conn.execute(f"PRAGMA table_info({table_name})")
+        cursor = await self.connection.execute(f"PRAGMA table_info({table_name})")
         columns = await cursor.fetchall()
         if column_name not in {column[1] for column in columns}:
-            await self._conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            await self.connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     async def close(self):
         if self._conn:
-            await self._conn.close()
+            await self.connection.close()
             self._conn = None
 
     async def execute(self, sql: str, params=None):
-        await self._conn.execute(sql, params or ())
-        await self._conn.commit()
+        async with self._access():
+            cursor = await self.connection.execute(sql, params or ())
+            await cursor.close()
+            if not self._transaction_depth:
+                await self.connection.commit()
+            return cursor
+
+    @asynccontextmanager
+    async def _access(self):
+        if self._transaction_owner is asyncio.current_task():
+            yield
+        else:
+            async with self._access_lock:
+                yield
+
+    @asynccontextmanager
+    async def transaction(self):
+        if self._transaction_owner is asyncio.current_task():
+            raise RuntimeError("Nested transactions are not supported")
+        async with self._access_lock:
+            await self.connection.execute("BEGIN")
+            self._transaction_depth = 1
+            self._transaction_owner = asyncio.current_task()
+            try:
+                yield self
+                await self.connection.commit()
+            except BaseException:
+                await self.connection.rollback()
+                raise
+            finally:
+                self._transaction_depth = 0
+                self._transaction_owner = None
 
     async def fetchone(self, sql: str, params=None):
-        cursor = await self._conn.execute(sql, params or ())
-        return await cursor.fetchone()
+        async with self._access():
+            async with self.connection.execute(sql, params or ()) as cursor:
+                return await cursor.fetchone()
 
     async def fetchall(self, sql: str, params=None):
-        cursor = await self._conn.execute(sql, params or ())
-        return await cursor.fetchall()
+        async with self._access():
+            async with self.connection.execute(sql, params or ()) as cursor:
+                return await cursor.fetchall()
 
     # 来源/模型 CRUD
     async def get_sources(self, active_only: bool = False) -> list[dict]:
@@ -176,7 +231,7 @@ class Database:
         rows = await self.fetchall(sql)
         return [self._row_to_source(row) for row in rows]
 
-    async def get_source(self, source_id: str) -> Optional[dict]:
+    async def get_source(self, source_id: str) -> dict | None:
         row = await self.fetchone(
             """
             SELECT id, name, interface_type, auth_preset, api_base_url,
@@ -197,10 +252,15 @@ class Database:
                 api_key_encrypted = existing.get("api_key_encrypted")
         await self.execute(
             """
-            INSERT OR REPLACE INTO sources
+            INSERT INTO sources
             (id, name, interface_type, auth_preset, api_base_url, api_key_encrypted,
              custom_headers, proxy, is_active, response_format)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, interface_type=excluded.interface_type,
+                auth_preset=excluded.auth_preset, api_base_url=excluded.api_base_url,
+                api_key_encrypted=excluded.api_key_encrypted, custom_headers=excluded.custom_headers,
+                proxy=excluded.proxy, is_active=excluded.is_active, response_format=excluded.response_format
             """,
             (
                 source_id,
@@ -241,7 +301,7 @@ class Database:
         rows = await self.fetchall(sql, params)
         return [self._row_to_source_model(row) for row in rows]
 
-    async def get_source_model(self, model_id: str) -> Optional[dict]:
+    async def get_source_model(self, model_id: str) -> dict | None:
         row = await self.fetchone(
             """
             SELECT id, source_id, display_name, model_id, default_size,
@@ -311,8 +371,9 @@ class Database:
         await self._ensure_column("generation_history", "tags", "TEXT")
 
     async def _migrate_to_v3(self):
-        """迁移到版本3：添加密钥加密存储（预留）"""
-        pass
+        """Keep the source/model binding when a prompt is saved and reused."""
+        await self._ensure_column("prompt_templates", "source_id", "TEXT")
+        await self._ensure_column("prompt_templates", "model_config_id", "TEXT")
 
     async def migrate_legacy_openai_config(self):
         existing = await self.get_sources()
@@ -329,83 +390,110 @@ class Database:
         if not row or not row[2]:
             return
         legacy = {
-            "id": row[0], "name": row[1], "api_base_url": row[2],
-            "api_key_encrypted": row[3], "custom_headers": row[4],
-            "model_name": row[5] or "", "proxy": row[6], "is_active": row[7],
+            "id": row[0],
+            "name": row[1],
+            "api_base_url": row[2],
+            "api_key_encrypted": row[3],
+            "custom_headers": row[4],
+            "model_name": row[5] or "",
+            "proxy": row[6],
+            "is_active": row[7],
         }
         source_id = "legacy_openai"
-        await self.save_source({
-            "id": source_id,
-            "name": legacy.get("name") or "OpenAI 兼容来源",
-            "interface_type": "openai_images",
-            "auth_preset": "openai",
-            "api_base_url": legacy.get("api_base_url", ""),
-            "api_key_encrypted": legacy.get("api_key_encrypted"),
-            "custom_headers": legacy.get("custom_headers"),
-            "proxy": legacy.get("proxy"),
-            "is_active": legacy.get("is_active", 1),
-        })
+        await self.save_source(
+            {
+                "id": source_id,
+                "name": legacy.get("name") or "OpenAI 兼容来源",
+                "interface_type": "openai_images",
+                "auth_preset": "openai",
+                "api_base_url": legacy.get("api_base_url", ""),
+                "api_key_encrypted": legacy.get("api_key_encrypted"),
+                "custom_headers": legacy.get("custom_headers"),
+                "proxy": legacy.get("proxy"),
+                "is_active": legacy.get("is_active", 1),
+            }
+        )
         model_name = legacy.get("model_name") or "gpt-image-1"
-        await self.save_source_model({
-            "id": "legacy_openai_model",
-            "source_id": source_id,
-            "display_name": model_name,
-            "model_id": model_name,
-            "default_size": "1024x1024",
-            "default_quality": "standard",
-            "default_n": 1,
-            "sort_order": 0,
-            "is_active": 1,
-        })
+        await self.save_source_model(
+            {
+                "id": "legacy_openai_model",
+                "source_id": source_id,
+                "display_name": model_name,
+                "model_id": model_name,
+                "default_size": "1024x1024",
+                "default_quality": "standard",
+                "default_n": 1,
+                "sort_order": 0,
+                "is_active": 1,
+            }
+        )
 
     def _row_to_source(self, row) -> dict:
         return {
-            "id": row[0], "name": row[1], "interface_type": row[2],
-            "auth_preset": row[3], "api_base_url": row[4],
-            "api_key_encrypted": row[5], "custom_headers": row[6],
-            "proxy": row[7], "is_active": row[8],
+            "id": row[0],
+            "name": row[1],
+            "interface_type": row[2],
+            "auth_preset": row[3],
+            "api_base_url": row[4],
+            "api_key_encrypted": row[5],
+            "custom_headers": row[6],
+            "proxy": row[7],
+            "is_active": row[8],
             "response_format": row[9] if len(row) > 9 else "openai",
         }
 
     def _row_to_source_model(self, row) -> dict:
         return {
-            "id": row[0], "source_id": row[1], "display_name": row[2],
-            "model_id": row[3], "default_size": row[4],
-            "default_quality": row[5], "default_n": row[6],
-            "sort_order": row[7], "is_active": row[8],
+            "id": row[0],
+            "source_id": row[1],
+            "display_name": row[2],
+            "model_id": row[3],
+            "default_size": row[4],
+            "default_quality": row[5],
+            "default_n": row[6],
+            "sort_order": row[7],
+            "is_active": row[8],
             "reference_image_enabled": bool(row[9]) if len(row) > 9 else False,
         }
 
     # 提示词模板 CRUD
-    async def get_prompt_templates(self, category: str = None) -> list[dict]:
+    async def get_prompt_templates(self, category: str | None = None) -> list[dict]:
         if category:
             rows = await self.fetchall(
-                "SELECT * FROM prompt_templates WHERE category = ? ORDER BY created_at DESC",
-                (category,)
+                "SELECT * FROM prompt_templates WHERE category = ? ORDER BY created_at DESC", (category,)
             )
         else:
             rows = await self.fetchall("SELECT * FROM prompt_templates ORDER BY created_at DESC")
         return [self._row_to_template(r) for r in rows]
 
     async def save_prompt_template(self, template: dict) -> int:
-        cursor = await self._conn.execute("""
-            INSERT INTO prompt_templates (name, prompt, negative_prompt, platform_id, params, category, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            template["name"], template["prompt"], template.get("negative_prompt"),
-            template.get("platform_id"), json.dumps(template.get("params", {})),
-            template.get("category"), template.get("tags"),
-        ))
-        await self._conn.commit()
+        cursor = await self.execute(
+            """
+            INSERT INTO prompt_templates
+            (name, prompt, negative_prompt, platform_id, params, category, tags, source_id, model_config_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                template["name"],
+                template["prompt"],
+                template.get("negative_prompt"),
+                template.get("platform_id"),
+                json.dumps(template.get("params", {})),
+                template.get("category"),
+                template.get("tags"),
+                template.get("source_id"),
+                template.get("model_config_id"),
+            ),
+        )
+        if cursor.lastrowid is None:
+            raise RuntimeError("Template insert returned no row ID")
         return cursor.lastrowid
 
     async def delete_prompt_template(self, template_id: int):
         await self.execute("DELETE FROM prompt_templates WHERE id = ?", (template_id,))
 
-    async def get_history_by_task_id(self, task_id: str) -> Optional[dict]:
-        row = await self.fetchone(
-            "SELECT * FROM generation_history WHERE task_id = ?", (task_id,)
-        )
+    async def get_history_by_task_id(self, task_id: str) -> dict | None:
+        row = await self.fetchone("SELECT * FROM generation_history WHERE task_id = ?", (task_id,))
         return self._row_to_history(row) if row else None
 
     async def delete_generation_history(self, task_id: str):
@@ -413,39 +501,80 @@ class Database:
 
     def _row_to_template(self, row) -> dict:
         return {
-            "id": row[0], "name": row[1], "prompt": row[2],
-            "negative_prompt": row[3], "platform_id": row[4],
+            "id": row[0],
+            "name": row[1],
+            "prompt": row[2],
+            "negative_prompt": row[3],
+            "platform_id": row[4],
             "params": json.loads(row[5]) if row[5] else {},
-            "category": row[6], "tags": row[7], "created_at": row[8],
+            "category": row[6],
+            "tags": row[7],
+            "created_at": row[8],
+            "source_id": row[9] if len(row) > 9 else None,
+            "model_config_id": row[10] if len(row) > 10 else None,
         }
 
     # 历史记录 CRUD
     async def save_generation_history(self, record: dict):
-        await self.execute("""
+        await self.execute(
+            """
             INSERT OR REPLACE INTO generation_history
             (task_id, platform_id, prompt, negative_prompt, params, image_path,
              thumbnail_path, seed, status, error, created_at, completed_at,
              source_id, model_config_id, request_url, request_payload, response_summary,
-             diagnostic, result_paths_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            record["task_id"], record.get("platform_id"), record.get("prompt"),
-            record.get("negative_prompt"), json.dumps(record.get("params", {})),
-            record.get("image_path"), record.get("thumbnail_path"),
-            record.get("seed"), record.get("status"),
-            record.get("error"), record.get("created_at"), record.get("completed_at"),
-            record.get("source_id"), record.get("model_config_id"), record.get("request_url"),
-            json.dumps(record.get("request_payload", {}), ensure_ascii=False),
-            record.get("response_summary"), json.dumps(record.get("diagnostic", {}), ensure_ascii=False),
-            json.dumps(record.get("result_paths_json", []), ensure_ascii=False),
-        ))
+             diagnostic, result_paths_json, category, tags)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                record["task_id"],
+                record.get("platform_id"),
+                record.get("prompt"),
+                record.get("negative_prompt"),
+                json.dumps(record.get("params", {})),
+                record.get("image_path"),
+                record.get("thumbnail_path"),
+                record.get("seed"),
+                record.get("status"),
+                record.get("error"),
+                record.get("created_at"),
+                record.get("completed_at"),
+                record.get("source_id"),
+                record.get("model_config_id"),
+                record.get("request_url"),
+                json.dumps(record.get("request_payload", {}), ensure_ascii=False),
+                record.get("response_summary"),
+                json.dumps(record.get("diagnostic", {}), ensure_ascii=False),
+                json.dumps(record.get("result_paths_json", []), ensure_ascii=False),
+                record.get("category"),
+                record.get("tags"),
+            ),
+        )
 
     async def get_generation_history(self, limit: int = 100, offset: int = 0) -> list[dict]:
         rows = await self.fetchall(
-            "SELECT * FROM generation_history ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset)
+            "SELECT * FROM generation_history ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit, offset)
         )
         return [self._row_to_history(r) for r in rows]
+
+    async def search_history(
+        self, query: str = "", status: str = "", limit: int = 60, offset: int = 0
+    ) -> tuple[list[dict], int]:
+        """Filter before pagination, including records beyond the first page."""
+        clauses, values = [], []
+        if query.strip():
+            pattern = "%" + query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            clauses.append("(prompt LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')")
+            values.extend([pattern] * 3)
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        count = await self.fetchone("SELECT COUNT(*) FROM generation_history" + where, values)
+        rows = await self.fetchall(
+            "SELECT * FROM generation_history" + where + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*values, max(1, min(limit, 200)), max(0, offset)],
+        )
+        return [self._row_to_history(row) for row in rows], count[0] if count else 0
 
     async def update_history_status(self, task_id: str, status: str, **kwargs):
         for key in kwargs:
@@ -461,10 +590,7 @@ class Database:
             sets.append(f"{k} = ?")
             vals.append(v)
         vals.append(task_id)
-        await self.execute(
-            f"UPDATE generation_history SET {', '.join(sets)} WHERE task_id = ?",
-            vals
-        )
+        await self.execute(f"UPDATE generation_history SET {', '.join(sets)} WHERE task_id = ?", vals)
 
     async def update_history_category(self, task_id: str, category: str):
         """更新历史记录的分类"""
@@ -482,12 +608,19 @@ class Database:
 
     def _row_to_history(self, row) -> dict:
         return {
-            "id": row[0], "task_id": row[1], "platform_id": row[2],
-            "prompt": row[3], "negative_prompt": row[4],
+            "id": row[0],
+            "task_id": row[1],
+            "platform_id": row[2],
+            "prompt": row[3],
+            "negative_prompt": row[4],
             "params": json.loads(row[5]) if row[5] else {},
-            "image_path": row[6], "thumbnail_path": row[7],
-            "seed": row[8], "status": row[9], "error": row[10],
-            "created_at": row[11], "completed_at": row[12],
+            "image_path": row[6],
+            "thumbnail_path": row[7],
+            "seed": row[8],
+            "status": row[9],
+            "error": row[10],
+            "created_at": row[11],
+            "completed_at": row[12],
             "source_id": row[13] if len(row) > 13 else None,
             "model_config_id": row[14] if len(row) > 14 else None,
             "request_url": row[15] if len(row) > 15 else None,

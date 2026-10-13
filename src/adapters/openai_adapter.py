@@ -1,29 +1,29 @@
-from .base import BaseAdapter, GenerationResult
-
-import base64
 import os
 import time
-from datetime import datetime
+from urllib.parse import urlsplit
 
 import httpx
 
-from src.adapters.errors import Category, Field, Diagnostic
-from src.models.task import GenerationTask
-from src.models.platform_config import PlatformConfig
+from src.adapters.errors import Category, Diagnostic, Field
 from src.config import constants
+from src.config.providers import RETIRED_MODELS
+from src.models.platform_config import PlatformConfig
+from src.models.task import GenerationTask
+
+from .base import BaseAdapter, GenerationResult
 
 
 class OpenAIAdapter(BaseAdapter):
     platform_id = "openai"
-    platform_name = "DALL·E / OpenAI Compatible"
+    platform_name = "GPT Image / OpenAI Compatible"
 
     def get_params_schema(self) -> dict:
         return {
             "model": {
                 "type": "input",
                 "label": "模型",
-                "options": ["dall-e-3", "gpt-image-1", "dall-e-2"],
-                "default": "dall-e-3",
+                "options": ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2"],
+                "default": "gpt-image-2.5-flare",
                 "placeholder": "中转模型名，如 gpt-image-1",
             },
             "size": {
@@ -77,7 +77,19 @@ class OpenAIAdapter(BaseAdapter):
             payload["quality"] = params["quality"]
         if params.get("style"):
             payload["style"] = params["style"]
-        if task.negative_prompt:
+        gpt_image = str(payload["model"] or "").startswith("gpt-image-")
+        if gpt_image:
+            payload["quality"] = {"standard": "auto", "hd": "high"}.get(
+                str(payload.get("quality") or "auto"), payload.get("quality", "auto")
+            )
+            payload["size"] = {"1792x1024": "1536x1024", "1024x1792": "1024x1536"}.get(payload["size"], payload["size"])
+            payload.pop("style", None)
+            for key in ("output_format", "background"):
+                if params.get(key):
+                    payload[key] = params[key]
+            if payload.get("background") == "transparent" and payload.get("output_format") == "jpeg":
+                raise ValueError("透明背景请选择 PNG 或 WebP 格式")
+        if task.negative_prompt and not gpt_image:
             payload["negative_prompt"] = task.negative_prompt
         return payload
 
@@ -90,18 +102,25 @@ class OpenAIAdapter(BaseAdapter):
             "auth_preset": config.auth_preset,
             "interface_type": config.interface_type,
         }
-        model_info = {
-            "display_name": config.model_display_name or config.model_name,
-            "model_id": config.model_name,
-        }
         started_at = time.perf_counter()
         try:
+            if config.model_name in RETIRED_MODELS and urlsplit(config.api_base_url).hostname == "api.openai.com":
+                raise ValueError("DALL·E 2/3 已退役，请在来源设置中选择 GPT Image 模型")
             client = self.get_http_client(config)
-            response = await client.post(
-                generation_url,
-                json=payload,
-                headers=headers,
-            )
+            if task.reference_image_path:
+                if config.interface_type != "openai_images" or not config.model_name.startswith("gpt-image-"):
+                    raise ValueError("当前模型不支持参考图编辑，请选择 GPT Image 模型")
+                generation_url = self.build_url(config.api_base_url, "/images/edits", config)
+                image_bytes, mime_type = await self.reference_data(task.reference_image_path)
+                headers.pop("Content-Type", None)
+                response = await client.post(
+                    generation_url,
+                    data={key: str(value) for key, value in payload.items()},
+                    files={"image": (os.path.basename(task.reference_image_path), image_bytes, mime_type)},
+                    headers=headers,
+                )
+            else:
+                response = await client.post(generation_url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
             duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -111,35 +130,27 @@ class OpenAIAdapter(BaseAdapter):
             if not image_refs:
                 original = f"响应格式不匹配：当前使用「{config.response_format}」解析，未提取到图片。请检查设置的响应格式选项。原始响应: {str(data)[:500]}"
                 diagnostic = self._build_diagnostic(
-                    Category.CONTENT, generation_url, payload, duration_ms,
-                    source_info, original,
+                    Category.CONTENT,
+                    generation_url,
+                    payload,
+                    duration_ms,
+                    source_info,
+                    original,
                 )
                 return GenerationResult(
                     success=False,
                     error=original,
                     raw_response={"diagnostic": diagnostic},
                 )
-            image_paths = []
-            for index, image_ref in enumerate(image_refs):
-                if not image_ref:
-                    continue
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_path = os.path.join(constants.GENERATIONS_DIR, f"{task.id}_{index + 1}_{timestamp}.png")
-                if image_ref.startswith("data:"):
-                    image_bytes = base64.b64decode(image_ref.split(",", 1)[1])
-                    with open(save_path, "wb") as file:
-                        file.write(image_bytes)
-                elif len(image_ref) > 100 and not image_ref.startswith(("http://", "https://")):
-                    with open(save_path, "wb") as file:
-                        file.write(base64.b64decode(image_ref))
-                else:
-                    await self.download_image(image_ref, save_path, config)
-                image_paths.append(save_path)
-                self._create_thumbnail(save_path)
+            image_paths = await self.save_image_refs(image_refs, task, config)
 
             diagnostic = self._build_diagnostic(
-                Category.UNKNOWN, generation_url, payload, duration_ms,
-                source_info, original=None,
+                Category.UNKNOWN,
+                generation_url,
+                payload,
+                duration_ms,
+                source_info,
+                original=None,
             )
             return GenerationResult(
                 success=True,
@@ -151,8 +162,12 @@ class OpenAIAdapter(BaseAdapter):
             original = self.format_http_status_error(exc)
             category = self.classify_status(exc.response.status_code)
             diagnostic = self._build_diagnostic(
-                category, generation_url, payload, duration_ms,
-                source_info, original,
+                category,
+                generation_url,
+                payload,
+                duration_ms,
+                source_info,
+                original,
                 status_code=exc.response.status_code,
             )
             return GenerationResult(
@@ -165,8 +180,12 @@ class OpenAIAdapter(BaseAdapter):
             original = self.format_generation_exception(exc, generation_url, payload)
             category = self.classify_exception(exc)
             diagnostic = self._build_diagnostic(
-                category, generation_url, payload, duration_ms,
-                source_info, original,
+                category,
+                generation_url,
+                payload,
+                duration_ms,
+                source_info,
+                original,
             )
             return GenerationResult(
                 success=False,
@@ -195,7 +214,7 @@ class OpenAIAdapter(BaseAdapter):
         return Diagnostic(
             category=category,
             fields=tuple(fields),
-            hint=self.hint_for_category(category),
+            hint=self.hint_for_category(category) if original else "请求完成，图片已保存到本地。",
             original=original or "",
             platform=self.platform_id,
             source_id=source_info.get("name", ""),
@@ -282,12 +301,7 @@ class OpenAIAdapter(BaseAdapter):
             details.append(f"请求地址: {url}")
         if payload:
             payload_summary = {
-                key: payload.get(key)
-                for key in ("model", "size", "quality", "n")
-                if payload.get(key) is not None
+                key: payload.get(key) for key in ("model", "size", "quality", "n") if payload.get(key) is not None
             }
-            details.append(
-                "请求参数: "
-                + ", ".join(f"{key}={value}" for key, value in payload_summary.items())
-            )
+            details.append("请求参数: " + ", ".join(f"{key}={value}" for key, value in payload_summary.items()))
         return "；".join(details)

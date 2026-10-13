@@ -1,16 +1,19 @@
 import asyncio
+import logging
 import threading
-from datetime import datetime
 from collections import deque
-from typing import Optional, Callable
+from collections.abc import Callable
+from datetime import datetime
+from typing import Optional
 
-from src.models.task import GenerationTask
-from src.models.platform_config import PlatformConfig
 from src.adapters import get_adapter
 from src.adapters.errors import Diagnostic
 from src.config import constants, database
 from src.config.encryption import decrypt
-from src.config.utils import parse_headers, get_thumbnail_path
+from src.config.providers import adapter_id
+from src.config.utils import get_thumbnail_path, parse_headers
+from src.models.platform_config import PlatformConfig
+from src.models.task import GenerationTask
 
 
 class QueueManager:
@@ -20,18 +23,20 @@ class QueueManager:
         self.tasks: deque[GenerationTask] = deque()
         self.max_concurrent = constants.DEFAULT_CONCURRENT
         self._running = False
-        self._worker_thread: Optional[threading.Thread] = None
+        self._worker_thread: threading.Thread | None = None
         self._wake_event = threading.Event()
         self._tasks_lock = threading.Lock()
         self._events_lock = threading.Lock()
         self._status_events: deque[tuple[GenerationTask, str]] = deque(maxlen=500)
-        self._status_callback: Optional[Callable] = None
-        self._db: Optional[database.Database] = None
-        self._worker_db: Optional[database.Database] = None
+        self._status_callback: Callable | None = None
+        self._db: database.Database | None = None
+        self._worker_db: database.Database | None = None
         self._generating_count = 0
         self._generating_lock = threading.Lock()
         self._in_flight_tasks: dict[str, GenerationTask] = {}
         self._finished_tasks: deque[GenerationTask] = deque(maxlen=50)
+        self._worker_loop = None
+        self._active_jobs: set[asyncio.Task] = set()
 
     @classmethod
     def get_instance(cls) -> "QueueManager":
@@ -67,9 +72,15 @@ class QueueManager:
     async def stop(self):
         self._running = False
         self._wake_event.set()
+        if self._worker_loop and self._worker_loop.is_running():
+            self._worker_loop.call_soon_threadsafe(self._cancel_active_jobs)
         if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=2)
+            await asyncio.to_thread(self._worker_thread.join, 5)
         self._worker_thread = None
+
+    def _cancel_active_jobs(self):
+        for job in self._active_jobs:
+            job.cancel()
 
     def drain_status_events(self) -> list[tuple[GenerationTask, str]]:
         with self._events_lock:
@@ -81,6 +92,7 @@ class QueueManager:
         asyncio.run(self._async_thread_main())
 
     async def _async_thread_main(self):
+        self._worker_loop = asyncio.get_running_loop()
         # Create a dedicated DB connection for this worker thread's event loop.
         # Only needed when the main DB is a real Database (not a mock) — use
         # the same path so the worker reads/writes the same data file.
@@ -89,24 +101,33 @@ class QueueManager:
             await self._worker_db.connect()
 
         try:
-            semaphore = asyncio.Semaphore(self.max_concurrent)
             in_flight: set[asyncio.Task] = set()
             while self._running:
+                in_flight = {job for job in in_flight if not job.done()}
+                self._active_jobs = in_flight
+                if len(in_flight) >= max(1, self.max_concurrent):
+                    await asyncio.sleep(0.05)
+                    continue
                 task = self._pop_next_task()
                 if task is None:
-                    await asyncio.sleep(0.5)
-                    in_flight = {t for t in in_flight if not t.done()}
+                    await asyncio.sleep(0.05)
                     continue
-                t = asyncio.create_task(self._process_task_with_semaphore(task, semaphore))
+                t = asyncio.create_task(self._process_task_with_semaphore(task, asyncio.Semaphore(1)))
                 in_flight.add(t)
             if in_flight:
                 await asyncio.gather(*in_flight, return_exceptions=True)
         finally:
+            from src.adapters import get_all_adapters
+
+            for adapter in get_all_adapters():
+                await adapter.close()
             if self._worker_db:
                 await self._worker_db.close()
                 self._worker_db = None
+            self._worker_loop = None
+            self._active_jobs.clear()
 
-    def _pop_next_task(self) -> Optional[GenerationTask]:
+    def _pop_next_task(self) -> GenerationTask | None:
         with self._tasks_lock:
             if not self.tasks:
                 return None
@@ -122,6 +143,7 @@ class QueueManager:
             if not config:
                 return
 
+            task.platform_id = adapter_id(config.interface_type)
             adapter = get_adapter(task.platform_id)
             if not adapter:
                 await self._fail_task(task, f"未找到平台适配器: {task.platform_id}")
@@ -133,11 +155,12 @@ class QueueManager:
             result = await adapter.generate(task, config)
             if result.success:
                 task.status = "COMPLETED"
-                task.result_paths = result.image_paths
+                task.result_paths = result.image_paths or []
                 task.completed_at = datetime.now()
             else:
                 task.status = "FAILED"
                 task.error = result.error or "生成失败"
+                task.completed_at = datetime.now()
             raw_diag = (result.raw_response or {}).get("diagnostic")
             if isinstance(raw_diag, Diagnostic):
                 task.params["_diagnostic"] = raw_diag
@@ -147,6 +170,9 @@ class QueueManager:
 
             await self._save_history(task)
             self._notify(task, "completed" if task.status == "COMPLETED" else "failed")
+        except asyncio.CancelledError:
+            await self._fail_task(task, "应用已停止，任务执行中断。请确认服务商结果后再重试。")
+            raise
         except Exception as exc:
             await self._fail_task(task, f"任务执行异常: {exc}")
 
@@ -164,7 +190,7 @@ class QueueManager:
                     self._generating_count -= 1
                     self._in_flight_tasks.pop(str(task.id), None)
 
-    async def _load_platform_config(self, task: GenerationTask) -> Optional[PlatformConfig]:
+    async def _load_platform_config(self, task: GenerationTask) -> PlatformConfig | None:
         db = self._worker_db or self._db
         if not db:
             await self._fail_task(task, "数据库未初始化，无法读取平台配置")
@@ -204,14 +230,20 @@ class QueueManager:
             is_active=bool(config_data.get("is_active", 1)),
         )
 
-    async def _load_source_model_config(self, task: GenerationTask) -> Optional[dict]:
+    async def _load_source_model_config(self, task: GenerationTask) -> dict | None:
         db = self._worker_db or self._db
+        if not db:
+            return None
         source = await db.get_source(task.source_id)
         model = await db.get_source_model(task.model_config_id)
         if not source or not model:
             return None
+        if model.get("source_id") and model["source_id"] != source["id"]:
+            return None
+        if not source.get("is_active", 1) or not model.get("is_active", 1):
+            return None
         interface_type = source.get("interface_type", "openai_images")
-        runtime_id = "custom" if interface_type == "custom" else "openai"
+        runtime_id = adapter_id(interface_type)
         return {
             "id": runtime_id,
             "name": source["name"],
@@ -251,14 +283,9 @@ class QueueManager:
                 None,
             )
             request_payload = {
-                f.name.removeprefix("payload."): f.value
-                for f in raw_diag.fields
-                if f.name.startswith("payload.")
+                f.name.removeprefix("payload."): f.value for f in raw_diag.fields if f.name.startswith("payload.")
             }
-            response_summary = (
-                f"[{raw_diag.category.value}] "
-                f"{raw_diag.original[:200] if raw_diag.original else ''}"
-            )
+            response_summary = f"[{raw_diag.category.value}] {raw_diag.original[:200] if raw_diag.original else ''}"
         elif isinstance(raw_diag, dict):
             diagnostic_dict = raw_diag
             request_url = raw_diag.get("request_url")
@@ -272,28 +299,31 @@ class QueueManager:
         params = dict(task.params or {})
         params.pop("_diagnostic", None)
         try:
-            await db.save_generation_history({
-                "task_id": str(task.id),
-                "platform_id": task.platform_id,
-                "source_id": task.source_id,
-                "model_config_id": task.model_config_id,
-                "prompt": task.prompt,
-                "negative_prompt": task.negative_prompt,
-                "params": params,
-                "image_path": image_path,
-                "thumbnail_path": get_thumbnail_path(image_path),
-                "result_paths_json": result_paths_json,
-                "status": task.status,
-                "error": task.error,
-                "request_url": request_url,
-                "request_payload": request_payload,
-                "response_summary": response_summary,
-                "diagnostic": diagnostic_dict,
-                "created_at": task.created_at.isoformat(),
-                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-            })
-        except Exception:
-            return
+            await db.save_generation_history(
+                {
+                    "task_id": str(task.id),
+                    "platform_id": task.platform_id,
+                    "source_id": task.source_id,
+                    "model_config_id": task.model_config_id,
+                    "prompt": task.prompt,
+                    "negative_prompt": task.negative_prompt,
+                    "params": params,
+                    "image_path": image_path,
+                    "thumbnail_path": get_thumbnail_path(image_path or ""),
+                    "result_paths_json": result_paths_json,
+                    "status": task.status,
+                    "error": task.error,
+                    "request_url": request_url,
+                    "request_payload": request_payload,
+                    "response_summary": response_summary,
+                    "diagnostic": diagnostic_dict,
+                    "created_at": task.created_at.isoformat(),
+                    "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                }
+            )
+        except Exception as exc:
+            task.params["_persistence_error"] = f"图片已生成，但历史记录保存失败：{exc}"
+            logging.getLogger(__name__).exception("Failed to save history for task %s", task.id)
 
     def _notify(self, task: GenerationTask, status: str):
         if threading.current_thread() is threading.main_thread():
@@ -308,9 +338,12 @@ class QueueManager:
             queued_tasks = list(self.tasks)
         waiting = completed = failed = 0
         for task in queued_tasks:
-            if task.status == "WAITING":     waiting += 1
-            elif task.status == "COMPLETED": completed += 1
-            elif task.status == "FAILED":    failed += 1
+            if task.status == "WAITING":
+                waiting += 1
+            elif task.status == "COMPLETED":
+                completed += 1
+            elif task.status == "FAILED":
+                failed += 1
         with self._generating_lock:
             generating = self._generating_count
             completed += sum(1 for task in self._finished_tasks if task.status == "COMPLETED")
@@ -336,6 +369,8 @@ class QueueManager:
             for task in list(self.tasks):
                 if str(task.id) == task_id and task.status == "WAITING":
                     self.tasks.remove(task)
+                    task.status = "CANCELLED"
+                    task.completed_at = datetime.now()
                     self._notify(task, "cancelled")
                     return True
         return False

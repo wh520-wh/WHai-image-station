@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 # NOTE: task.params['_diagnostic'] holds a Diagnostic object (src.adapters.errors.Diagnostic)
@@ -15,14 +15,14 @@ class GenerationTask:
     model_config_id: str = ""
     prompt: str = ""
     negative_prompt: str = ""
-    params: "dict[str, object]" = field(default_factory=dict)
-    reference_image_path: Optional[str] = None
+    params: "dict[str, Any]" = field(default_factory=dict)
+    reference_image_path: str | None = None
     status: str = "WAITING"
     result_paths: list = field(default_factory=list)
-    error: Optional[str] = None
+    error: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
     def to_dict(self) -> dict:
         return {

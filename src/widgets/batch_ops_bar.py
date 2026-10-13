@@ -1,6 +1,7 @@
 # src/widgets/batch_ops_bar.py
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
+
 from src.widgets.theme import COLORS, button_style
 
 
@@ -20,8 +21,8 @@ class BatchOpsBar(QFrame):
         self.setProperty("imageMakerBatchOpsBar", True)
         self.setStyleSheet(f"""
             QFrame[imageMakerBatchOpsBar="true"] {{
-                background: {COLORS['panel']};
-                border: 1px solid {COLORS['border']};
+                background: {COLORS["panel"]};
+                border: 1px solid {COLORS["border"]};
                 border-radius: 12px;
             }}
         """)

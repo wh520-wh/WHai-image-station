@@ -1,4 +1,5 @@
 """Shared utility functions used across config, managers, and widgets."""
+
 from __future__ import annotations
 
 import json

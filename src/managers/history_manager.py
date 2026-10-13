@@ -1,15 +1,15 @@
+import os
 from typing import Optional
 
-import os
-
-from src.config import database, constants
+from src.config import constants, database
+from src.config.utils import get_thumbnail_path
 
 
 class HistoryManager:
     _instance: Optional["HistoryManager"] = None
 
-    def __init__(self):
-        self._db: Optional[database.Database] = None
+    def __init__(self, db: database.Database | None = None):
+        self._db = db
 
     @classmethod
     def get_instance(cls) -> "HistoryManager":
@@ -20,12 +20,12 @@ class HistoryManager:
     async def initialize(self, db: database.Database):
         self._db = db
 
-    async def get_history(self, limit: int = 100) -> list[dict]:
+    async def get_history(self, limit: int = 100, offset: int = 0) -> list[dict]:
         if not self._db:
             return []
-        return await self._db.get_generation_history(limit)
+        return await self._db.get_generation_history(limit, offset)
 
-    async def get_record(self, task_id: str) -> Optional[dict]:
+    async def get_record(self, task_id: str) -> dict | None:
         if not self._db:
             return None
         return await self._db.get_history_by_task_id(task_id)
@@ -44,19 +44,22 @@ class HistoryManager:
 
     async def delete_record(self, task_id: str):
         """删除历史记录和对应的图片文件。文件删除失败不影响数据库记录清理。"""
-        history = await self.get_history(1000)
-        for record in history:
-            if record.get("task_id") == task_id:
-                paths = set(record.get("result_paths") or [])
-                if record.get("image_path"):
-                    paths.add(record["image_path"])
-                if record.get("thumbnail_path"):
-                    paths.add(record["thumbnail_path"])
-                for path in paths:
-                    if path and os.path.exists(path) and not os.path.isdir(path):
-                        try:
-                            os.remove(path)
-                        except (PermissionError, OSError) as e:
-                            print(f"[history_manager] Failed to remove {path}: {e}")
-                await self._db.delete_generation_history(task_id)
-                break
+        if not self._db:
+            return
+        record = await self.get_record(task_id)
+        if record:
+            paths = set(record.get("result_paths") or [])
+            if record.get("image_path"):
+                paths.add(record["image_path"])
+            if record.get("thumbnail_path"):
+                paths.add(record["thumbnail_path"])
+            paths.update(
+                get_thumbnail_path(path) for path in list(paths) if path and path != record.get("thumbnail_path")
+            )
+            for path in paths:
+                if path and os.path.exists(path) and not os.path.isdir(path):
+                    try:
+                        os.remove(path)
+                    except (PermissionError, OSError) as e:
+                        print(f"[history_manager] Failed to remove {path}: {e}")
+            await self._db.delete_generation_history(task_id)

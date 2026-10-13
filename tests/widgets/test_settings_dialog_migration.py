@@ -17,13 +17,13 @@ def mock_db():
         return []
 
     db = MagicMock()
-    db.migrate_legacy_openai_config = MagicMock(return_value=mock_migrate())
-    db.get_sources = MagicMock(return_value=mock_get_sources())
-    db.get_source_models = MagicMock(return_value=mock_get_source_models(""))
+    db.migrate_legacy_openai_config = AsyncMock(side_effect=mock_migrate)
+    db.get_sources = AsyncMock(side_effect=mock_get_sources)
+    db.get_source_models = AsyncMock(side_effect=mock_get_source_models)
     return db
 
 class TestSettingsDialogMigration:
-    def test_export_button_triggers_export(self, app, mock_db):
+    def test_export_button_triggers_export(self, app, mock_db, qtbot):
         """Test that clicking export button triggers MigrationManager.export"""
         dialog = SettingsDialog(mock_db)
 
@@ -37,6 +37,7 @@ class TestSettingsDialogMigration:
             with patch('src.widgets.settings_dialog.QFileDialog.getSaveFileName', return_value=("test.imbackup", "")):
                 with patch('src.widgets.settings_dialog.QMessageBox.information'):
                     dialog._on_export()
+                    qtbot.waitUntil(lambda: mock_migration.export.await_count == 1)
 
         mock_migration.export.assert_called_once()
 
@@ -71,7 +72,7 @@ class TestSettingsDialogMigration:
         assert hasattr(dialog, 'export_keys_btn')
         assert hasattr(dialog, 'import_keys_btn')
 
-        # Check that clicking them shows an info dialog (stub implementation)
-        with patch('src.widgets.settings_dialog.QMessageBox.information'):
+        # Cancelling the file picker must leave the configured credentials untouched.
+        with patch('src.widgets.settings_dialog.QFileDialog.getSaveFileName', return_value=("", "")), patch('src.widgets.settings_dialog.QFileDialog.getOpenFileName', return_value=("", "")):
             dialog._on_export_keys()
             dialog._on_import_keys()

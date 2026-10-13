@@ -61,6 +61,7 @@ Thumbs.db
 .pyright/
 
 # Project-specific
+.codegraph/
 .imageMaker/
 *.imbackup
 *.keys.tmp

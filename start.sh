@@ -31,4 +31,4 @@ fi
 
 echo "[INFO] Starting WHai Image Station..."
 echo
-python src/main.py
+python -m src.main

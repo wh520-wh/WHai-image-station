@@ -47,7 +47,7 @@ if not exist ".venv\.deps_installed" (
 
 echo [INFO] Starting WHai Image Station...
 echo.
-python src\main.py
+python -m src.main
 
 if errorlevel 1 (
     echo.

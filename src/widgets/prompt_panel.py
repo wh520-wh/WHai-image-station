@@ -1,13 +1,19 @@
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QScrollArea
-)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from src.widgets.components.prompt_card import PromptCard
-from src.widgets.theme import COLORS, RADIUS, app_font, apply_card_style, button_style, label_style, make_empty_state_label, scroll_area_style
 from src.config.event_loop import run_async
+from src.widgets.components.prompt_card import PromptCard
+from src.widgets.theme import (
+    COLORS,
+    RADIUS,
+    app_font,
+    apply_card_style,
+    button_style,
+    label_style,
+    make_empty_state_label,
+    scroll_area_style,
+)
 
 
 class PromptPanel(QWidget):
@@ -33,7 +39,7 @@ class PromptPanel(QWidget):
 
         title_layout = QHBoxLayout()
         title = QLabel("提示词库")
-        title.setFont(app_font(13, QFont.Bold))
+        title.setFont(app_font(13, QFont.Weight.Bold))
         title.setStyleSheet(label_style("title"))
         title_layout.addWidget(title)
         title_layout.addStretch()
@@ -50,7 +56,10 @@ class PromptPanel(QWidget):
         self.add_btn = QPushButton("+")
         self.add_btn.setFixedSize(30, 30)
         self.add_btn.setToolTip("新增模板")
-        self.add_btn.setStyleSheet(button_style("primary") + f"QPushButton {{ padding: 0; border-radius: {RADIUS['card']}px; font-size: 18px; }}")
+        self.add_btn.setStyleSheet(
+            button_style("primary")
+            + f"QPushButton {{ padding: 0; border-radius: {RADIUS['card']}px; font-size: 18px; }}"
+        )
         self.add_btn.clicked.connect(self._add_template)
         title_layout.addWidget(self.add_btn)
         main_layout.addLayout(title_layout)
@@ -58,8 +67,8 @@ class PromptPanel(QWidget):
         self.category_scroll = QScrollArea()
         self.category_scroll.setFixedHeight(38)
         self.category_scroll.setWidgetResizable(True)
-        self.category_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.category_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.category_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.category_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.category_scroll.setStyleSheet(scroll_area_style())
 
         self.category_widget = QWidget()
@@ -88,7 +97,7 @@ class PromptPanel(QWidget):
         )
         self.expand_btn.clicked.connect(self._toggle_collapse)
         self.expand_btn.setVisible(False)
-        main_layout.addWidget(self.expand_btn, alignment=Qt.AlignCenter)
+        main_layout.addWidget(self.expand_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         main_layout.addStretch()
 
     def _toggle_collapse(self):
@@ -120,8 +129,9 @@ class PromptPanel(QWidget):
     def _update_category_widget(self):
         while self.category_layout.count():
             item = self.category_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget() if item else None
+            if widget:
+                widget.deleteLater()
 
         all_btn = QPushButton("全部")
         all_btn.setCheckable(True)
@@ -144,10 +154,10 @@ class PromptPanel(QWidget):
         if checked:
             return f"""
             QPushButton {{
-                background: {COLORS['primary']};
-                color: {COLORS['panel']};
+                background: {COLORS["primary"]};
+                color: {COLORS["panel"]};
                 border: none;
-                border-radius: {RADIUS['control']}px;
+                border-radius: {RADIUS["control"]}px;
                 padding: 6px 13px;
                 font-size: 11px;
                 font-weight: 700;
@@ -155,17 +165,17 @@ class PromptPanel(QWidget):
             """
         return f"""
         QPushButton {{
-            background: {COLORS['panel_alt']};
-            color: {COLORS['muted']};
-            border: 1px solid {COLORS['border']};
-            border-radius: {RADIUS['control']}px;
+            background: {COLORS["panel_alt"]};
+            color: {COLORS["muted"]};
+            border: 1px solid {COLORS["border"]};
+            border-radius: {RADIUS["control"]}px;
             padding: 6px 13px;
             font-size: 11px;
         }}
         QPushButton:hover {{
-            background: {COLORS['primary_soft']};
-            color: {COLORS['primary_text']};
-            border-color: {COLORS['primary']};
+            background: {COLORS["primary_soft"]};
+            color: {COLORS["primary_text"]};
+            border-color: {COLORS["primary"]};
         }}
         """
 
@@ -176,8 +186,9 @@ class PromptPanel(QWidget):
     def _update_template_list(self):
         while self.template_layout.count():
             item = self.template_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget() if item else None
+            if widget:
+                widget.deleteLater()
 
         if not self.templates:
             empty = make_empty_state_label("暂无提示词模板\n保存常用 Prompt 后会显示在这里")

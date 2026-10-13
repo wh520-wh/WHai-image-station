@@ -1,8 +1,13 @@
 from __future__ import annotations
-import os, json, base64
+
+import base64
+import json
+import os
+
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
 
 class KeyVault:
     """API密钥安全存储，使用AES-128-CBC加密"""
@@ -24,7 +29,7 @@ class KeyVault:
                 salt = os.urandom(16)
                 with open(salt_file, "wb") as f:
                     f.write(salt)
-        except (IOError, OSError) as e:
+        except OSError as e:
             raise ValueError(f"Failed to access salt file {salt_file}: {e}") from e
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
@@ -39,7 +44,7 @@ class KeyVault:
             try:
                 with open(self._vault_path, "rb") as f:
                     encrypted = f.read()
-            except (IOError, OSError) as e:
+            except OSError as e:
                 raise ValueError(f"Failed to read vault file: {e}") from e
             if encrypted:
                 try:
@@ -53,7 +58,7 @@ class KeyVault:
             with open(self._vault_path, "wb") as f:
                 encrypted = self._fernet.encrypt(json.dumps(self._data).encode())
                 f.write(encrypted)
-        except (IOError, OSError) as e:
+        except OSError as e:
             raise ValueError(f"Failed to write vault file: {e}") from e
 
     def store(self, platform_id: str, key: str) -> None:
@@ -72,10 +77,7 @@ class KeyVault:
         return key[:6] + "*" * (len(key) - 8) + key[-2:]
 
     def list_keys(self) -> list[dict]:
-        return [
-            {"platform_id": pid, "masked": self.get_masked(pid)}
-            for pid in self._data.keys()
-        ]
+        return [{"platform_id": pid, "masked": self.get_masked(pid)} for pid in self._data.keys()]
 
     def delete(self, platform_id: str) -> None:
         if platform_id in self._data:
@@ -95,7 +97,7 @@ class KeyVault:
         try:
             with open(file_path, "rb") as f:
                 decrypted = decrypt_fernet.decrypt(f.read())
-        except (IOError, OSError) as e:
+        except OSError as e:
             raise ValueError(f"Failed to read encrypted file: {e}") from e
         except Exception as e:
             raise ValueError("Failed to decrypt file - incorrect password or corrupted data") from e

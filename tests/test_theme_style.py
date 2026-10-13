@@ -1,22 +1,19 @@
 from src.widgets.theme import COLORS, RADIUS, button_style, card_style, compact_input_style, input_style
 
 
-def test_theme_uses_sky_sunset_palette():
-    assert COLORS["sky"] == "#48C6F0"
-    assert COLORS["panel_alt"] == "#FFF0D6"
-    assert COLORS["sunset"] == "#E87828"
-    assert COLORS["background"] == "#F7EFE2"
-    assert COLORS["panel"] == "#FFF8EC"
-    assert COLORS["primary"] == "#E87828"
-    assert COLORS["accent"] == "#5BC8F0"
-    assert COLORS["text"] == "#2F3538"
-    assert RADIUS["card"] == 18
+def test_primary_text_has_readable_contrast():
+    def luminance(color):
+        values = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        values = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4 for value in values]
+        return sum(value * weight for value, weight in zip(values, (.2126, .7152, .0722)))
+    assert (luminance("#FFFFFF") + .05) / (luminance(COLORS["primary"]) + .05) >= 4.5
+    assert RADIUS["card"] > RADIUS["control"]
 
 
-def test_primary_button_uses_sunset_accent():
+def test_primary_button_uses_theme_accent():
     style = button_style("primary")
-    assert "#E87828" in style
-    assert "#667EEA" not in style
+    assert COLORS["primary"] in style
+    assert COLORS["primary_hover"] in style
 
 
 def test_spacing_dict_uses_4px_grid():

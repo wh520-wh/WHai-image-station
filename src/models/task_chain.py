@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
+
 
 @dataclass
 class ChainTask:
@@ -13,6 +15,7 @@ class ChainTask:
     params: dict = field(default_factory=dict)
     status: str = "pending"  # pending, generating, completed, failed, skipped
     trigger_on: str = "success"  # success, failure, any
+
 
 @dataclass
 class TaskChain:

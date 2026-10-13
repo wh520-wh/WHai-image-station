@@ -1,25 +1,33 @@
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSplitter, QLabel,
-    QGraphicsDropShadowEffect, QApplication
-)
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor
-
 from collections import deque
 
-from src.widgets.prompt_panel import PromptPanel
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
+
+from src.adapters.errors import Category, Diagnostic
+from src.config.event_loop import run_async, schedule_async
+from src.config.utils import get_thumbnail_path
+from src.managers import HistoryManager, PromptManager, QueueManager
+from src.managers.batch_ops_manager import BatchOpsManager
+from src.managers.task_chain_manager import TaskChainManager
+from src.models.batch_result import BatchResult
 from src.widgets.generation_panel import GenerationPanel
 from src.widgets.history_panel import HistoryPanel
-from src.widgets.settings_dialog import SettingsDialog
 from src.widgets.image_viewer import ImageViewer
-from src.widgets.theme import COLORS, SPACING, button_style
+from src.widgets.prompt_panel import PromptPanel
+from src.widgets.settings_dialog import SettingsDialog
 from src.widgets.task_chain_editor import TaskChainEditor
-from src.managers import QueueManager, PromptManager, HistoryManager
-from src.managers.task_chain_manager import TaskChainManager
-from src.adapters import get_all_adapters
-from src.adapters.errors import Category, Diagnostic
-from src.config.event_loop import run_async
-from src.config.utils import get_thumbnail_path
+from src.widgets.theme import COLORS, SPACING, app_font, button_style, label_style
 
 
 class MainWindow(QWidget):
@@ -29,9 +37,8 @@ class MainWindow(QWidget):
         self.queue_manager = QueueManager.get_instance()
         self.prompt_manager = PromptManager.get_instance()
         self.history_manager = HistoryManager.get_instance()
-        self.task_chain_manager = (
-            TaskChainManager.get_instance(self.db, self.queue_manager)
-            or TaskChainManager(self.db, self.queue_manager)
+        self.task_chain_manager = TaskChainManager.get_instance(self.db, self.queue_manager) or TaskChainManager(
+            self.db, self.queue_manager
         )
         self._setup_ui()
         self._connect_signals()
@@ -43,11 +50,11 @@ class MainWindow(QWidget):
 
         # Loading overlay shown during initial data load
         self.loading_overlay = QLabel("正在加载数据...", self)
-        self.loading_overlay.setAlignment(Qt.AlignCenter)
+        self.loading_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_overlay.setStyleSheet(f"""
             QLabel {{
                 background: rgba(247, 239, 226, 0.92);
-                color: {COLORS['muted']};
+                color: {COLORS["muted"]};
                 font-size: 16px;
                 font-weight: 600;
             }}
@@ -59,14 +66,9 @@ class MainWindow(QWidget):
 
     def _setup_ui(self):
         self.setWindowTitle("WHai Image Station - 图片生成工具")
-        self.setMinimumSize(1200, 700)
-        # 检测屏幕尺寸，仅在超大分辨率使用纯色避免重绘延迟
-        screen = QApplication.primaryScreen()
-        if screen and screen.size().width() > 2560:
-            bg = COLORS['background']
-        else:
-            bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['sky_soft']}, stop:0.5 {COLORS['panel']}, stop:1 {COLORS['primary_soft']})"
-        self.setStyleSheet(f"QWidget {{ background: {bg}; }}")
+        self.setMinimumSize(1100, 700)
+        self.setObjectName("imageStationWindow")
+        self.setStyleSheet(f"QWidget#imageStationWindow {{ background: {COLORS['background']}; }}")
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(16, 16, 16, 16)
@@ -74,6 +76,14 @@ class MainWindow(QWidget):
 
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        brand = QLabel("WHai  /  Image Station")
+        brand.setFont(app_font(20, QFont.Weight.DemiBold))
+        brand.setStyleSheet(f"color: {COLORS['text']}; background: transparent;")
+        toolbar_layout.addWidget(brand)
+        subtitle = QLabel("你的图像创作空间")
+        subtitle.setStyleSheet(label_style("muted"))
+        toolbar_layout.addWidget(subtitle)
+        toolbar_layout.addStretch()
 
         self.chain_editor_btn = QPushButton("任务链")
         self.chain_editor_btn.setMinimumSize(72, 34)
@@ -100,7 +110,7 @@ class MainWindow(QWidget):
         self.history_panel.setMinimumWidth(300)
         self.history_panel.setMaximumWidth(460)
 
-        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.addWidget(self.prompt_panel)
         self.main_splitter.addWidget(self.generation_panel)
         self.main_splitter.addWidget(self.history_panel)
@@ -111,29 +121,18 @@ class MainWindow(QWidget):
         self.main_splitter.setCollapsible(0, True)
         main_layout.addWidget(self.main_splitter, 1)
 
-        for panel in [self.prompt_panel, self.generation_panel, self.history_panel]:
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(8)
-            shadow.setOffset(0, 2)
-            shadow.setColor(QColor(0, 0, 0, 18))
-            panel.setGraphicsEffect(shadow)
-
         # Bottom status bar
         status_layout = QHBoxLayout()
-        status_layout.setContentsMargins(*(SPACING['xs'],)*4)
+        status_layout.setContentsMargins(*(SPACING["xs"],) * 4)
 
         self.status_source_label = QLabel("")
-        self.status_source_label.setStyleSheet(
-            f"color: {COLORS['muted']}; font-size: 11px;"
-        )
+        self.status_source_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
         status_layout.addWidget(self.status_source_label)
 
         status_layout.addStretch()
 
         self.status_queue_label = QLabel("")
-        self.status_queue_label.setStyleSheet(
-            f"color: {COLORS['muted']}; font-size: 11px;"
-        )
+        self.status_queue_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
         status_layout.addWidget(self.status_queue_label)
 
         main_layout.addLayout(status_layout)
@@ -149,10 +148,15 @@ class MainWindow(QWidget):
         self.history_panel.image_selected.connect(self._on_image_selected)
         self.history_panel.reuse_requested.connect(self.generation_panel.apply_template)
         self.history_panel.delete_requested.connect(self._on_delete_history_record)
+        self.history_panel.load_more_requested.connect(self._load_more_history)
+        bar = self.history_panel.batch_bar
+        bar.delete_requested.connect(self._batch_delete)
+        bar.export_requested.connect(self._batch_export)
+        bar.move_requested.connect(self._batch_move)
+        bar.tag_requested.connect(self._batch_tag)
         self.queue_manager.set_status_callback(self._on_queue_status_changed)
         self.task_chain_manager.set_status_callback(self._on_task_chain_status_changed)
         self.prompt_panel.collapse_changed.connect(self._on_prompt_panel_collapse_changed)
-
 
     def _on_prompt_panel_collapse_changed(self, collapsed: bool):
         if collapsed:
@@ -161,7 +165,6 @@ class MainWindow(QWidget):
         else:
             self.prompt_panel.setMaximumWidth(260)
             self.prompt_panel.setMinimumWidth(180)
-
 
     def _start_queue_polling(self):
         self.queue_timer = QTimer(self)
@@ -176,7 +179,6 @@ class MainWindow(QWidget):
         for chain in self.task_chain_manager.drain_status_events():
             self._on_task_chain_status_changed(chain)
         if events:
-            self._refresh_platform_config_statuses()
             self._update_status_bar()
 
     def _update_status_bar(self):
@@ -187,20 +189,14 @@ class MainWindow(QWidget):
             if hasattr(self.generation_panel, "sources") and self.generation_panel.sources:
                 current_source_id = getattr(self.generation_panel, "current_source_id", "")
                 current_source = next(
-                    (
-                        source
-                        for source in self.generation_panel.sources
-                        if source.get("id") == current_source_id
-                    ),
+                    (source for source in self.generation_panel.sources if source.get("id") == current_source_id),
                     None,
                 )
                 active = [source for source in self.generation_panel.sources if source.get("is_active")]
                 display_source = current_source or (active[0] if active else None)
                 if display_source:
                     name = display_source.get("name", "未知")
-                    model_count = len(self.generation_panel.models_by_source.get(
-                        display_source.get("id", ""), []
-                    ))
+                    model_count = len(self.generation_panel.models_by_source.get(display_source.get("id", ""), []))
                     source_text = f"✓ 来源: {name} · {model_count} 个模型"
                 else:
                     source_text = "⚠ 未配置来源 — 请前往设置"
@@ -209,9 +205,7 @@ class MainWindow(QWidget):
 
             info = self.queue_manager.get_queue_info()
             queue_text = (
-                f"队列 {info['waiting']} · "
-                f"生成中 {info['generating']} · "
-                f"已完成 {info['completed'] + info['failed']}"
+                f"队列 {info['waiting']} · 生成中 {info['generating']} · 已完成 {info['completed'] + info['failed']}"
             )
         except Exception:
             pass
@@ -220,7 +214,10 @@ class MainWindow(QWidget):
         self.status_queue_label.setText(queue_text)
 
     def _load_data(self):
-        run_async(self._async_load_data_with_history())
+        schedule_async(self._async_load_data_with_history(), on_error=self._show_load_error)
+
+    def _show_load_error(self, error):
+        self.loading_overlay.setText(f"加载失败：{error}")
 
     async def _async_load_data_with_history(self):
         """合并数据加载和历史加载为单个 async 调用，减少主线程阻塞。"""
@@ -266,13 +263,12 @@ class MainWindow(QWidget):
             self.loading_overlay.setStyleSheet(f"""
                 QLabel {{
                     background: rgba(247, 239, 226, 0.92);
-                    color: {COLORS['danger']};
+                    color: {COLORS["danger"]};
                     font-size: 16px;
                     font-weight: 600;
                 }}
             """)
             print(f"Failed to load data: {e}")
-
 
     def _refresh_platform_config_statuses(self):
         statuses = {"openai": False}
@@ -307,18 +303,21 @@ class MainWindow(QWidget):
 
     def _submit_tasks(self, task_data: dict):
         from src.models.task import GenerationTask
+
         params = dict(task_data.get("params", {}))
         count = max(1, int(params.pop("n", 1)))
         for _ in range(count):
-            self.queue_manager.add_task(GenerationTask(
-                platform_id=task_data.get("platform_id", "openai"),
-                source_id=task_data.get("source_id", ""),
-                model_config_id=task_data.get("model_config_id", ""),
-                prompt=task_data["prompt"],
-                negative_prompt=task_data.get("negative_prompt", ""),
-                params=dict(params),
-                reference_image_path=task_data.get("reference_image_path"),
-            ))
+            self.queue_manager.add_task(
+                GenerationTask(
+                    platform_id=task_data.get("platform_id", "openai"),
+                    source_id=task_data.get("source_id", ""),
+                    model_config_id=task_data.get("model_config_id", ""),
+                    prompt=task_data["prompt"],
+                    negative_prompt=task_data.get("negative_prompt", ""),
+                    params=dict(params),
+                    reference_image_path=task_data.get("reference_image_path"),
+                )
+            )
         self.generation_panel.refresh_queue()
         self._refresh_platform_config_statuses()
 
@@ -341,9 +340,13 @@ class MainWindow(QWidget):
         if status == "added":
             self.generation_panel.show_status("\u4efb\u52a1\u5df2\u52a0\u5165\u961f\u5217\u3002", "success")
         elif status == "pending":
-            self.generation_panel.show_status("\u4efb\u52a1\u51c6\u5907\u4e2d\uff0c\u6b63\u5728\u8bfb\u53d6\u5e73\u53f0\u914d\u7f6e\u3002", "info")
+            self.generation_panel.show_status(
+                "\u4efb\u52a1\u51c6\u5907\u4e2d\uff0c\u6b63\u5728\u8bfb\u53d6\u5e73\u53f0\u914d\u7f6e\u3002", "info"
+            )
         elif status == "generating":
-            self.generation_panel.show_status("\u6b63\u5728\u751f\u6210\u56fe\u7247\u4e2d\u2026\u8bf7\u7a0d\u5019\u3002", "info")
+            self.generation_panel.show_status(
+                "\u6b63\u5728\u751f\u6210\u56fe\u7247\u4e2d\u2026\u8bf7\u7a0d\u5019\u3002", "info"
+            )
         elif status == "failed":
             diag_obj = None
             if isinstance(task.params, dict):
@@ -362,40 +365,124 @@ class MainWindow(QWidget):
             self.generation_panel.show_status(diag_obj.hint or diag_obj.original or "生成失败", "error")
             self._refresh_diagnostic_history()
         elif status == "completed":
-            self.generation_panel.show_status("\u751f\u6210\u5b8c\u6210\uff0c\u5df2\u52a0\u5165\u5386\u53f2\u753b\u5eca\u3002", "success")
+            if task.params.get("_persistence_error"):
+                self.generation_panel.show_status(task.params["_persistence_error"], "warning")
+            self.generation_panel.show_status(
+                "\u751f\u6210\u5b8c\u6210\uff0c\u5df2\u52a0\u5165\u5386\u53f2\u753b\u5eca\u3002", "success"
+            )
             raw = task.params.get("_diagnostic") if isinstance(task.params, dict) else None
-            diag_obj = raw if isinstance(raw, Diagnostic) else (Diagnostic.from_dict(raw) if isinstance(raw, dict) else None)
+            diag_obj = (
+                raw if isinstance(raw, Diagnostic) else (Diagnostic.from_dict(raw) if isinstance(raw, dict) else None)
+            )
             self.generation_panel.update_diagnostic(diag_obj)
             if task.result_paths:
-                self.history_panel.add_record({
-                    "task_id": str(task.id),
-                    "platform_id": task.platform_id,
-                    "source_id": task.source_id,
-                    "model_config_id": task.model_config_id,
-                    "prompt": task.prompt,
-                    "image_path": task.result_paths[0],
-                    "thumbnail_path": get_thumbnail_path(task.result_paths[0]),
-                    "status": task.status,
-                    "negative_prompt": task.negative_prompt,
-                    "params": task.params,
-                    "diagnostic": task.params.get("_diagnostic", {}) if isinstance(task.params, dict) else {},
-                })
+                self.history_panel.add_record(
+                    {
+                        "task_id": str(task.id),
+                        "platform_id": task.platform_id,
+                        "source_id": task.source_id,
+                        "model_config_id": task.model_config_id,
+                        "prompt": task.prompt,
+                        "image_path": task.result_paths[0],
+                        "thumbnail_path": get_thumbnail_path(task.result_paths[0]),
+                        "status": task.status,
+                        "negative_prompt": task.negative_prompt,
+                        "params": task.params,
+                        "diagnostic": diag_obj.to_dict() if diag_obj else {},
+                        "result_paths": list(task.result_paths),
+                        "created_at": task.created_at.isoformat(),
+                    }
+                )
+        elif status == "cancelled":
+            self.generation_panel.show_status("已取消等待中的任务。", "info")
 
     def _on_delete_history_record(self, record: dict):
         task_id = record.get("task_id")
         if not task_id:
             return
         run_async(self.history_manager.delete_record(task_id))
-        self.history_panel.history = [item for item in self.history_panel.history if item.get("task_id") != task_id]
+        self.history_panel.history = deque(
+            item for item in self.history_panel.history if item.get("task_id") != task_id
+        )
         self.history_panel._update_grid()
 
-    def _refresh_diagnostic_history(self):
-        if not hasattr(self, 'history_panel') or not self.history_panel:
+    def _load_more_history(self, offset):
+        self.history_panel.load_more_btn.setEnabled(False)
+
+        async def load():
+            return await self.history_manager.get_history(100, offset)
+
+        def done(records):
+            self.history_panel.history.extend(records)
+            self.history_panel._apply_filters()
+            self.history_panel.load_more_btn.setEnabled(bool(records))
+            if not records:
+                self.history_panel.load_more_btn.setText("已加载全部记录")
+
+        schedule_async(
+            load(),
+            on_success=done,
+            on_error=lambda error: self.generation_panel.show_status(f"加载失败：{error}", "error"),
+        )
+
+    def _batch_manager(self):
+        from src.config import constants
+
+        return BatchOpsManager(self.history_manager, self.db, constants.GENERATIONS_DIR)
+
+    def _batch_done(self, result: BatchResult | str | None = None):
+        self.history_panel.exit_batch_mode()
+        self._load_data()
+        self.generation_panel.show_status(
+            "批量操作完成。"
+            if not isinstance(result, BatchResult) or not result.failed_count
+            else f"部分操作失败：{'; '.join(result.errors)}",
+            "info",
+        )
+
+    def _batch_delete(self, ids):
+        if (
+            not ids
+            or QMessageBox.question(
+                self,
+                "删除选中图片",
+                f"删除选中的 {len(ids)} 条记录与本地图片？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
-        records = [
-            r for r in self.history_panel.history
-            if r.get("error") or r.get("diagnostic")
-        ]
+        schedule_async(
+            self._batch_manager().delete_records(ids),
+            on_success=self._batch_done,
+            on_error=lambda error: self.generation_panel.show_status(str(error), "error"),
+        )
+
+    def _batch_export(self, ids):
+        path, _ = QFileDialog.getSaveFileName(self, "导出选中图片", "WHai-images.zip", "ZIP 文件 (*.zip)")
+        if path and ids:
+            schedule_async(
+                self._batch_manager().export_records(ids, path),
+                on_success=self._batch_done,
+                on_error=lambda error: self.generation_panel.show_status(str(error), "error"),
+            )
+
+    def _batch_move(self, ids):
+        category, ok = QInputDialog.getText(self, "图片分类", "分类名称")
+        if ok and category.strip() and ids:
+            schedule_async(self._batch_manager().move_records(ids, category.strip()), on_success=self._batch_done)
+
+    def _batch_tag(self, ids):
+        text, ok = QInputDialog.getText(self, "图片标签", "标签，用逗号分隔")
+        tags = [tag.strip() for tag in text.replace("，", ",").split(",") if tag.strip()]
+        if ok and tags and ids:
+            schedule_async(self._batch_manager().add_tags(ids, tags), on_success=self._batch_done)
+
+    def _refresh_diagnostic_history(self):
+        if not hasattr(self, "history_panel") or not self.history_panel:
+            return
+        records = [r for r in self.history_panel.history if r.get("error") or r.get("diagnostic")]
         self.generation_panel.show_diagnostic_history(list(records)[:8])
 
     def _on_image_selected(self, record: dict):
@@ -418,12 +505,12 @@ class MainWindow(QWidget):
             default_model_config_id=self.generation_panel.current_model_id,
         )
         editor.chain_saved.connect(self._on_chain_saved)
-        editor.setWindowFlags(Qt.Dialog)
-        editor.setWindowModality(Qt.NonModal)
+        editor.setWindowFlags(Qt.WindowType.Dialog)
+        editor.setWindowModality(Qt.WindowModality.NonModal)
         editor.resize(800, 600)
         editor.show()
         # 保存引用防止被垃圾回收
-        if not hasattr(self, '_open_editors'):
+        if not hasattr(self, "_open_editors"):
             self._open_editors = []
         self._open_editors.append(editor)
 
@@ -440,8 +527,7 @@ class MainWindow(QWidget):
             if editor and not editor.isHidden():
                 editor._refresh_chain_list(getattr(chain, "id", None))
 
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'loading_overlay'):
+        if hasattr(self, "loading_overlay"):
             self.loading_overlay.setGeometry(self.rect())

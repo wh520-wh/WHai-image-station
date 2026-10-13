@@ -1,16 +1,43 @@
-from collections import deque
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QGridLayout,
-    QFrame, QPushButton, QApplication, QMenu, QLineEdit, QComboBox, QMessageBox,
-    QSizePolicy
-)
-from PySide6.QtCore import Qt, Signal, QTimer, QUrl
-from datetime import datetime, timedelta
-from PySide6.QtGui import QPixmap, QPixmapCache, QFont, QDesktopServices
-
 import os
+from collections import deque
+from datetime import datetime, timedelta
 
-from src.widgets.theme import COLORS, RADIUS, SPACING, app_font, apply_card_style, button_style, compact_input_style, label_style, make_empty_state_label, scroll_area_style
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap, QPixmapCache
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from src.widgets.batch_ops_bar import BatchOpsBar
+from src.widgets.theme import (
+    COLORS,
+    RADIUS,
+    SPACING,
+    apply_card_style,
+    button_style,
+    compact_input_style,
+    label_style,
+    make_empty_state_label,
+    scroll_area_style,
+)
+
+
+class HistoryItemFrame(QFrame):
+    _task_id: str | None = None
+    _base_style: str = ""
 
 
 class HistoryPanel(QWidget):
@@ -18,6 +45,7 @@ class HistoryPanel(QWidget):
     reuse_requested = Signal(dict)
     delete_requested = Signal(dict)
     batch_selection_changed = Signal(set)
+    load_more_requested = Signal(int)
 
     def __init__(self, history_manager, parent=None):
         super().__init__(parent)
@@ -35,17 +63,17 @@ class HistoryPanel(QWidget):
         self._current_sort = "时间倒序"
         QPixmapCache.setCacheLimit(51200)
         self._setup_ui()
-        self._dpi_scale = self.logicalDpiX() / 96.0
+        self._dpi_scale = 1.0  # Qt already scales logical pixels for the screen DPI.
 
     def _setup_ui(self):
         apply_card_style(self)
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(SPACING['md'])
+        main_layout.setSpacing(SPACING["md"])
 
         self.title_layout = QHBoxLayout()
         self.title_layout.setContentsMargins(0, 0, 0, 0)
-        self.title_layout.setSpacing(SPACING['sm'])
+        self.title_layout.setSpacing(SPACING["sm"])
         title = QLabel("历史画廊")
         title.setStyleSheet(label_style("title"))
         self.title_layout.addWidget(title)
@@ -62,38 +90,38 @@ class HistoryPanel(QWidget):
         self.toolbar_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         toolbar_layout = QVBoxLayout(self.toolbar_frame)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.setSpacing(SPACING['sm'])
+        toolbar_layout.setSpacing(SPACING["sm"])
 
         self.search_toolbar_frame = QFrame()
         self.search_toolbar_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         search_layout = QHBoxLayout(self.search_toolbar_frame)
-        search_layout.setContentsMargins(0, 0, SPACING['sm'], 0)
-        search_layout.setSpacing(SPACING['sm'])
+        search_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        search_layout.setSpacing(SPACING["sm"])
 
         self.filter_toolbar_frame = QFrame()
         self.filter_toolbar_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         filter_layout = QHBoxLayout(self.filter_toolbar_frame)
-        filter_layout.setContentsMargins(0, 0, SPACING['sm'], 0)
-        filter_layout.setSpacing(SPACING['sm'])
+        filter_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        filter_layout.setSpacing(SPACING["sm"])
 
         self.sort_toolbar_frame = QFrame()
         self.sort_toolbar_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         sort_layout = QHBoxLayout(self.sort_toolbar_frame)
-        sort_layout.setContentsMargins(0, 0, SPACING['sm'], 0)
-        sort_layout.setSpacing(SPACING['sm'])
+        sort_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        sort_layout.setSpacing(SPACING["sm"])
 
         self.action_toolbar_frame = QFrame()
         self.action_toolbar_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         action_layout = QHBoxLayout(self.action_toolbar_frame)
-        action_layout.setContentsMargins(0, 0, SPACING['sm'], 0)
-        action_layout.setSpacing(SPACING['sm'])
+        action_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        action_layout.setSpacing(SPACING["sm"])
 
         # 搜索输入
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索...")
         self.search_input.setToolTip("搜索提示词关键词")
         self.search_input.setMinimumWidth(96)
-        self.search_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_input.setStyleSheet(compact_input_style())
         self.search_input.textChanged.connect(self._on_search_changed)
         search_layout.addWidget(self.search_input)
@@ -103,7 +131,7 @@ class HistoryPanel(QWidget):
         self.platform_filter.addItem("全部")
         self.platform_filter.setToolTip("按平台筛选")
         self.platform_filter.setMinimumWidth(88)
-        self.platform_filter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.platform_filter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.platform_filter.setStyleSheet(compact_input_style())
         self.platform_filter.currentTextChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.platform_filter)
@@ -112,7 +140,7 @@ class HistoryPanel(QWidget):
         self.date_filter.addItems(["全部", "今天", "本周", "本月"])
         self.date_filter.setToolTip("按时间范围筛选")
         self.date_filter.setMinimumWidth(82)
-        self.date_filter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.date_filter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.date_filter.setStyleSheet(compact_input_style())
         self.date_filter.currentTextChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.date_filter)
@@ -121,7 +149,7 @@ class HistoryPanel(QWidget):
         self.sort_combo.addItems(["时间倒序", "时间正序", "按平台"])
         self.sort_combo.setToolTip("排序方式")
         self.sort_combo.setMinimumWidth(118)
-        self.sort_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.sort_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.sort_combo.setStyleSheet(compact_input_style())
         self.sort_combo.currentTextChanged.connect(self._on_sort_changed)
         sort_layout.addWidget(self.sort_combo)
@@ -165,6 +193,15 @@ class HistoryPanel(QWidget):
         toolbar_layout.addWidget(self.action_toolbar_frame)
 
         main_layout.addWidget(self.toolbar_frame)
+        self.batch_btn = QPushButton("批量选择")
+        self.batch_btn.setStyleSheet(button_style("ghost"))
+        self.batch_btn.clicked.connect(self.toggle_batch_mode)
+        main_layout.addWidget(self.batch_btn)
+        self.batch_bar = BatchOpsBar()
+        self.batch_bar.setVisible(False)
+        self.batch_selection_changed.connect(lambda ids: self.batch_bar._set_selected_ids(list(ids)))
+        self.batch_bar.clear_selection_requested.connect(self.exit_batch_mode)
+        main_layout.addWidget(self.batch_bar)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -172,14 +209,16 @@ class HistoryPanel(QWidget):
 
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setHorizontalSpacing(SPACING['lg'])
-        self.grid_layout.setVerticalSpacing(SPACING['lg'])
+        self.grid_layout.setHorizontalSpacing(SPACING["lg"])
+        self.grid_layout.setVerticalSpacing(SPACING["lg"])
         self.grid_layout.setContentsMargins(0, 0, 16, 0)
 
         self.scroll_area.setWidget(self.grid_widget)
         main_layout.addWidget(self.scroll_area, 1)
-
-
+        self.load_more_btn = QPushButton("加载更早的记录")
+        self.load_more_btn.setStyleSheet(button_style("ghost"))
+        self.load_more_btn.clicked.connect(lambda: self.load_more_requested.emit(len(self.history)))
+        main_layout.addWidget(self.load_more_btn)
 
     def load_history(self, records: list[dict] | None = None):
         if records is not None:
@@ -194,8 +233,10 @@ class HistoryPanel(QWidget):
         from src.config.event_loop import run_async
 
         try:
+
             async def _load():
                 return await self.history_manager.get_history(100)
+
             self.history = deque(run_async(_load()))
         except Exception:
             self.history = deque()
@@ -203,7 +244,7 @@ class HistoryPanel(QWidget):
 
     def _update_grid(self, records: list[dict] | None = None):
         if records is None:
-            records = self.history
+            records = list(self.history)
 
         display_history = [r for r in records if self._record_has_image(r)]
 
@@ -218,10 +259,10 @@ class HistoryPanel(QWidget):
         needs_full_rebuild = False
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
-            w = item.widget()
+            w = item.widget() if item else None
             if w is None:
                 continue
-            task_id = getattr(w, '_task_id', None)
+            task_id = getattr(w, "_task_id", None)
             if task_id is None:
                 # Empty-state labels and other non-item widgets
                 w.deleteLater()
@@ -229,7 +270,7 @@ class HistoryPanel(QWidget):
                 if w.width() != target_w or w.height() != target_h:
                     needs_full_rebuild = True
                 w.setVisible(False)
-                existing_items[w._task_id] = w
+                existing_items[getattr(w, "_task_id", "")] = w
 
         if needs_full_rebuild:
             for w in existing_items.values():
@@ -252,6 +293,7 @@ class HistoryPanel(QWidget):
                     item = self._create_image_item(record, thumb_path)
                 else:
                     item.setVisible(True)
+                self._paint_selection(item, record.get("task_id"))
                 self.grid_layout.addWidget(item, row, col)
 
             # Clean up unused widgets
@@ -276,7 +318,7 @@ class HistoryPanel(QWidget):
         return bool(image_path or thumbnail_path)
 
     def _create_image_item(self, record: dict, thumb_path: str | None) -> QFrame:
-        frame = QFrame()
+        frame = HistoryItemFrame()
         frame.setProperty("imageMakerHistoryItem", True)
         if self.view_mode == "single":
             frame.setFixedSize(int(220 * self._dpi_scale), int(164 * self._dpi_scale))
@@ -285,27 +327,28 @@ class HistoryPanel(QWidget):
 
         has_recorded_path = bool(record.get("thumbnail_path") or record.get("image_path"))
         file_missing = has_recorded_path and (thumb_path is None or (thumb_path and not os.path.exists(thumb_path)))
-        border_color = COLORS['warning'] if file_missing else COLORS['border']
+        border_color = COLORS["warning"] if file_missing else COLORS["border"]
 
         frame.setStyleSheet(f"""
             QFrame[imageMakerHistoryItem="true"] {{
-                background: {COLORS['panel']};
+                background: {COLORS["panel"]};
                 border: 1px solid {border_color};
-                border-radius: {RADIUS['card']}px;
+                border-radius: {RADIUS["card"]}px;
             }}
             QFrame[imageMakerHistoryItem="true"]:hover {{
-                border: 2px solid {COLORS['accent']};
-                background: {COLORS['sky_soft']};
+                border: 2px solid {COLORS["accent"]};
+                background: {COLORS["sky_soft"]};
             }}
         """)
-        frame.setCursor(Qt.PointingHandCursor)
+        frame.setCursor(Qt.CursorShape.PointingHandCursor)
+        frame._base_style = frame.styleSheet()
 
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(SPACING['sm'], SPACING['sm'], SPACING['sm'], SPACING['sm'])
-        layout.setSpacing(SPACING['sm'])
+        layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        layout.setSpacing(SPACING["sm"])
 
         label = QLabel()
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if self.view_mode == "single":
             label.setFixedSize(int(204 * self._dpi_scale), int(140 * self._dpi_scale))
         else:
@@ -318,35 +361,41 @@ class HistoryPanel(QWidget):
                 target_w = int(90 * self._dpi_scale)
                 target_h = int(106 * self._dpi_scale)
             cached_key = f"thumb_{thumb_path}_{target_w}x{target_h}"
-            pixmap = QPixmapCache.find(cached_key)
-            if not pixmap:
+            pixmap = QPixmap()
+            if not QPixmapCache.find(cached_key, pixmap):
                 pixmap = QPixmap(thumb_path).scaled(
-                    target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation,
+                    target_w,
+                    target_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
                 QPixmapCache.insert(cached_key, pixmap)
             label.setPixmap(pixmap)
         elif file_missing:
             label.setText("文件缺失")
-            label.setStyleSheet(f"color: {COLORS['warning']}; font-size: 10px; border: 1px dashed {COLORS['warning']}; border-radius: {RADIUS['compact']}px;")
+            label.setStyleSheet(
+                f"color: {COLORS['warning']}; font-size: 10px; border: 1px dashed {COLORS['warning']}; border-radius: {RADIUS['compact']}px;"
+            )
         else:
             label.setText("图片")
             label.setStyleSheet(f"color: {COLORS['subtle']}; font-size: 12px;")
         layout.addWidget(label)
 
-        frame.setFocusPolicy(Qt.StrongFocus)
-        frame.mousePressEvent = lambda event, r=record: self.image_selected.emit(r)
+        frame.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        frame.mousePressEvent = lambda event, r=record, w=frame: self._activate_record(r, w)
         frame.keyPressEvent = lambda event, r=record, w=frame: self._handle_item_key(event, r, w)
-        frame.setContextMenuPolicy(Qt.CustomContextMenu)
+        frame.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         frame.customContextMenuRequested.connect(lambda pos, r=record, w=frame: self._show_record_menu(r, w, pos))
         frame._task_id = record.get("task_id")
         return frame
 
     def _handle_item_key(self, event, record, widget):
-        if event.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Space):
-            self.image_selected.emit(record)
-        elif event.key() == Qt.Key_Menu or (event.key() == Qt.Key_F10 and event.modifiers() == Qt.ShiftModifier):
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Space):
+            self._activate_record(record, widget)
+        elif event.key() == Qt.Key.Key_Menu or (
+            event.key() == Qt.Key.Key_F10 and event.modifiers() == Qt.KeyboardModifier.ShiftModifier
+        ):
             self._show_record_menu(record, widget, widget.rect().bottomLeft())
-
 
     def _show_record_menu(self, record: dict, widget: QWidget, pos):
         menu = QMenu(widget)
@@ -368,10 +417,13 @@ class HistoryPanel(QWidget):
                 self._open_in_file_manager(path)
         elif action == delete_action:
             reply = QMessageBox.question(
-                widget, "确认删除", "确定要删除这条历史记录吗？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                widget,
+                "确认删除",
+                "确定要删除这条历史记录吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 self.delete_requested.emit(record)
 
     def _open_in_file_manager(self, file_path: str) -> None:
@@ -392,28 +444,56 @@ class HistoryPanel(QWidget):
         self._batch_mode = not self._batch_mode
         if not self._batch_mode:
             self._selected_ids.clear()
+        self.batch_bar.setVisible(self._batch_mode)
+        self.batch_btn.setText("结束选择" if self._batch_mode else "批量选择")
+        self._update_grid()
         self.batch_selection_changed.emit(self._selected_ids)
 
     def enter_batch_mode(self):
         """Enter batch selection mode."""
         self._batch_mode = True
+        self.batch_bar.setVisible(True)
         self.batch_selection_changed.emit(self._selected_ids)
 
     def exit_batch_mode(self):
         """Exit batch selection mode and clear selection."""
         self._batch_mode = False
         self._selected_ids.clear()
+        self.batch_bar.setVisible(False)
+        self.batch_btn.setText("批量选择")
+        self._update_grid()
         self.batch_selection_changed.emit(self._selected_ids)
+
+    def _activate_record(self, record, widget):
+        if not self._batch_mode:
+            self.image_selected.emit(record)
+            return
+        task_id = record.get("task_id")
+        if task_id in self._selected_ids:
+            self._selected_ids.remove(task_id)
+        elif task_id:
+            self._selected_ids.add(task_id)
+        self._paint_selection(widget, task_id)
+        self.batch_selection_changed.emit(set(self._selected_ids))
+
+    def _paint_selection(self, widget, task_id):
+        style = getattr(widget, "_base_style", widget.styleSheet())
+        if self._batch_mode and task_id in self._selected_ids:
+            style += f"QFrame[imageMakerHistoryItem='true'] {{ border: 2px solid {COLORS['primary']}; background: {COLORS['primary_soft']}; }}"
+        widget.setStyleSheet(style)
 
     def request_reuse(self, record: dict):
         self.reuse_requested.emit(record)
 
     def _clear_history(self):
         reply = QMessageBox.question(
-            self, "确认清空", "确定要清空所有历史记录吗？此操作不可撤销。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self,
+            "确认清空",
+            "确定要清空所有历史记录吗？此操作不可撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         from src.config.event_loop import run_async
 
@@ -422,8 +502,9 @@ class HistoryPanel(QWidget):
                 task_id = record.get("task_id")
                 if task_id:
 
-                    async def _delete():
-                        await self.history_manager.delete_record(task_id)
+                    async def _delete(tid=task_id):
+                        await self.history_manager.delete_record(tid)
+
                     run_async(_delete())
 
         self.history = deque()
@@ -445,11 +526,9 @@ class HistoryPanel(QWidget):
         )
 
     def _refresh_platform_filter_options(self):
-        existing_platforms = sorted({
-            r.get("platform_id", "未知") or "未知"
-            for r in self.history
-            if r.get("platform_id")
-        })
+        existing_platforms = sorted(
+            {r.get("platform_id", "未知") or "未知" for r in self.history if r.get("platform_id")}
+        )
         current_text = self.platform_filter.currentText()
         self.platform_filter.blockSignals(True)
         self.platform_filter.clear()
@@ -472,8 +551,9 @@ class HistoryPanel(QWidget):
             has_recorded_path = bool(image_path or thumbnail_path)
             if not has_recorded_path:
                 continue
-            has_file = (image_path and os.path.exists(image_path)) or \
-                       (thumbnail_path and os.path.exists(thumbnail_path))
+            has_file = (image_path and os.path.exists(image_path)) or (
+                thumbnail_path and os.path.exists(thumbnail_path)
+            )
             if not has_file:
                 invalid.append(record)
 
@@ -481,17 +561,22 @@ class HistoryPanel(QWidget):
             return
 
         reply = QMessageBox.question(
-            self, "确认清理", f"发现 {len(invalid)} 条图片文件已丢失的记录，确定删除吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self,
+            "确认清理",
+            f"发现 {len(invalid)} 条图片文件已丢失的记录，确定删除吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         for record in invalid:
             task_id = record.get("task_id")
             if task_id and self.history_manager:
+
                 async def _del(tid=task_id):
                     await self.history_manager.delete_record(tid)
+
                 run_async(_del())
 
         self.load_history()
@@ -532,9 +617,11 @@ class HistoryPanel(QWidget):
         filtered = []
         for r in self.history:
             if search_text and not (
-                search_text in str(r.get("prompt", "")) or
-                search_text in str(r.get("platform_id", "")) or
-                search_text in str(r.get("model", ""))
+                search_text in str(r.get("prompt", ""))
+                or search_text in str(r.get("platform_id", ""))
+                or search_text in str(r.get("request_payload", {}).get("model", r.get("model_config_id", "")))
+                or search_text in str(r.get("tags", ""))
+                or search_text in str(r.get("category", ""))
             ):
                 continue
             if platform != "全部" and r.get("platform_id") != platform:
@@ -558,5 +645,11 @@ class HistoryPanel(QWidget):
         timestamp = record.get("created_at") or record.get("timestamp") or 0
         if isinstance(timestamp, (int, float)):
             return datetime.fromtimestamp(timestamp)
+        if isinstance(timestamp, datetime):
+            return timestamp.replace(tzinfo=None)
+        if isinstance(timestamp, str):
+            try:
+                return datetime.fromisoformat(timestamp).replace(tzinfo=None)
+            except ValueError:
+                pass
         return datetime.min
-

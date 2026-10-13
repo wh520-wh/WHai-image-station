@@ -1,22 +1,40 @@
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QTextEdit, QComboBox, QFrame,
-    QFileDialog, QMessageBox, QTabWidget, QInputDialog, QApplication,
-    QSizePolicy, QScrollArea,
-)
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
-
-import os
 import json
+import os
+
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.adapters import get_all_adapters
 from src.adapters.errors import Diagnostic
-from src.widgets.components.prompt_card import TaskCard
+from src.config.providers import adapter_id, model_capabilities
 from src.widgets.components.diagnostic_card import DiagnosticCard
+from src.widgets.components.prompt_card import TaskCard
 from src.widgets.theme import (
-    COLORS, SPACING, app_font, apply_card_style, button_style, input_style,
-    label_style, scroll_area_style, tab_style
+    COLORS,
+    app_font,
+    apply_card_style,
+    button_style,
+    input_style,
+    label_style,
+    scroll_area_style,
 )
 
 
@@ -43,6 +61,7 @@ class GenerationPanel(QWidget):
         self.reference_image_path = None
         self.platform_configured: dict[str, bool] = {}
         self.platform_config_messages: dict[str, str] = {}
+        self._param_labels = {}
         self._setup_ui()
         self._load_adapters()
         self._install_shortcuts()
@@ -54,11 +73,11 @@ class GenerationPanel(QWidget):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_area.setStyleSheet(scroll_area_style())
 
         self.content_widget = QWidget()
-        self.content_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         main_layout = QVBoxLayout(self.content_widget)
         main_layout.setContentsMargins(0, 0, 8, 0)
         main_layout.setSpacing(12)
@@ -67,7 +86,7 @@ class GenerationPanel(QWidget):
 
         header_layout = QHBoxLayout()
         heading = QLabel("创作工作台")
-        heading.setFont(app_font(13, QFont.Bold))
+        heading.setFont(app_font(13, QFont.Weight.Bold))
         heading.setStyleSheet(label_style("section"))
         header_layout.addWidget(heading)
         header_layout.addStretch()
@@ -80,8 +99,8 @@ class GenerationPanel(QWidget):
         self.config_hint_frame.setProperty("imageMakerConfigHint", True)
         self.config_hint_frame.setStyleSheet(f"""
             QFrame[imageMakerConfigHint="true"] {{
-                background: {COLORS['warning_soft']};
-                border: 1px solid {COLORS['border_strong']};
+                background: {COLORS["warning_soft"]};
+                border: 1px solid {COLORS["border_strong"]};
                 border-radius: 12px;
             }}
         """)
@@ -97,7 +116,9 @@ class GenerationPanel(QWidget):
         hint_layout.addWidget(self.open_settings_btn)
         self.hint_status_stack = QFrame()
         self.hint_status_stack.setProperty("imageMakerTransparentFrame", True)
-        self.hint_status_stack.setStyleSheet('QFrame[imageMakerTransparentFrame="true"] { background: transparent; border: none; }')
+        self.hint_status_stack.setStyleSheet(
+            'QFrame[imageMakerTransparentFrame="true"] { background: transparent; border: none; }'
+        )
         hint_status_layout = QVBoxLayout(self.hint_status_stack)
         hint_status_layout.setContentsMargins(0, 0, 0, 0)
         hint_status_layout.setSpacing(0)
@@ -110,7 +131,9 @@ class GenerationPanel(QWidget):
         status_layout.setContentsMargins(16, 8, 16, 8)
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        self.status_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         status_layout.addWidget(self.status_label)
         self.copy_status_btn = QPushButton("复制")
         self.copy_status_btn.setStyleSheet(button_style("ghost"))
@@ -122,14 +145,14 @@ class GenerationPanel(QWidget):
         self.close_status_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
-                color: {COLORS['muted']};
+                color: {COLORS["muted"]};
                 border: none;
                 font-size: 18px;
                 font-weight: bold;
                 padding: 0;
             }}
             QPushButton:hover {{
-                color: {COLORS['text']};
+                color: {COLORS["text"]};
             }}
         """)
         self.close_status_btn.clicked.connect(lambda: self.status_frame.setVisible(False))
@@ -147,13 +170,13 @@ class GenerationPanel(QWidget):
         self.selector_action_layout.setSpacing(10)
         self.source_combo = QComboBox()
         self.source_combo.setMinimumWidth(180)
-        self.source_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.source_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.source_combo.setStyleSheet(input_style())
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         self._add_param_widget(self.selector_control_layout, "来源", self.source_combo)
         self.model_combo = QComboBox()
         self.model_combo.setMinimumWidth(190)
-        self.model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.model_combo.setStyleSheet(input_style())
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self._add_param_widget(self.selector_control_layout, "模型", self.model_combo)
@@ -189,7 +212,9 @@ class GenerationPanel(QWidget):
         left_layout.addWidget(self.prompt_edit)
         prompt_layout.addLayout(left_layout, 1)
 
-        right_layout = QVBoxLayout()
+        self.negative_container = QWidget()
+        right_layout = QVBoxLayout(self.negative_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
         right_label = QLabel("Negative Prompt")
         right_label.setStyleSheet(label_style("section"))
@@ -199,7 +224,7 @@ class GenerationPanel(QWidget):
         self.negative_edit.setStyleSheet(input_style())
         self.negative_edit.setMinimumHeight(128)
         right_layout.addWidget(self.negative_edit)
-        prompt_layout.addLayout(right_layout, 1)
+        prompt_layout.addWidget(self.negative_container, 1)
         main_layout.addWidget(prompt_frame, 2)
 
         params_frame = QFrame()
@@ -215,9 +240,11 @@ class GenerationPanel(QWidget):
         self.size_combo = QComboBox()
         self.size_combo.setEditable(True)
         self.size_combo.addItems(["1024×1024", "1792×1024", "1024×1792"])
-        self.size_combo.lineEdit().setPlaceholderText("如 1536x1024")
+        size_editor = QLineEdit()
+        size_editor.setPlaceholderText("如 1536x1024")
+        self.size_combo.setLineEdit(size_editor)
         self.size_combo.setMinimumWidth(90)
-        self.size_combo.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.size_combo.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.size_combo.setStyleSheet(input_style())
         self._add_param_widget(self.primary_params_layout, "尺寸", self.size_combo)
 
@@ -225,36 +252,49 @@ class GenerationPanel(QWidget):
         self.quality_combo.setEditable(True)
         self.quality_combo.addItems(["standard", "hd", "low", "medium", "high", "auto"])
         self.quality_combo.setMinimumWidth(90)
-        self.quality_combo.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.quality_combo.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.quality_combo.setStyleSheet(input_style())
         self._add_param_widget(self.primary_params_layout, "质量", self.quality_combo)
 
         self.count_combo = QComboBox()
-        self.count_combo.addItems(["1", "2", "4"])
+        self.count_combo.addItems(["1", "2", "4", "8"])
         self.count_combo.setMinimumWidth(60)
-        self.count_combo.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.count_combo.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.count_combo.setStyleSheet(input_style())
         self._add_param_widget(self.primary_params_layout, "数量", self.count_combo)
 
         self.seed_input = QComboBox()
         self.seed_input.setEditable(True)
-        self.seed_input.lineEdit().setPlaceholderText("随机")
+        seed_editor = QLineEdit()
+        seed_editor.setPlaceholderText("随机")
+        self.seed_input.setLineEdit(seed_editor)
         self.seed_input.setMinimumWidth(80)
-        self.seed_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        self.seed_input.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.seed_input.setStyleSheet(input_style())
         self._add_param_widget(self.secondary_params_layout, "Seed", self.seed_input)
         self.primary_params_layout.addStretch()
 
         self.advanced_btn = QPushButton("+ 高级参数")
         self.advanced_btn.setStyleSheet(button_style("secondary"))
-        self.advanced_btn.clicked.connect(
-            lambda: QMessageBox.information(self, "高级参数", "高级参数入口已保留，后续可接入平台专属参数。")
-        )
+        self.advanced_btn.setCheckable(True)
         self.secondary_params_layout.addWidget(self.advanced_btn)
         self.secondary_params_layout.addStretch()
         params_layout.addLayout(self.primary_params_layout)
         params_layout.addLayout(self.secondary_params_layout)
         main_layout.addWidget(params_frame)
+        self.advanced_frame = QFrame()
+        apply_card_style(self.advanced_frame, COLORS["panel_alt"])
+        advanced_layout = QHBoxLayout(self.advanced_frame)
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["png", "jpeg", "webp"])
+        self.format_combo.setStyleSheet(input_style())
+        self._add_param_widget(advanced_layout, "输出格式", self.format_combo)
+        self.transparent_check = QCheckBox("透明背景")
+        self.transparent_check.setToolTip("透明背景需要 PNG 或 WebP；服务商可能限制可用模型")
+        advanced_layout.addWidget(self.transparent_check)
+        self.advanced_frame.setVisible(False)
+        self.advanced_btn.toggled.connect(self.advanced_frame.setVisible)
+        main_layout.addWidget(self.advanced_frame)
 
         actions_frame = QFrame()
         apply_card_style(actions_frame)
@@ -329,7 +369,7 @@ class GenerationPanel(QWidget):
 
         queue_header = QHBoxLayout()
         queue_label = QLabel("生成队列")
-        queue_label.setFont(app_font(12, QFont.Bold))
+        queue_label.setFont(app_font(12, QFont.Weight.Bold))
         queue_label.setStyleSheet(label_style("section"))
         queue_header.addWidget(queue_label)
         self.queue_count_label = QLabel("(0)")
@@ -350,7 +390,6 @@ class GenerationPanel(QWidget):
         self.queue_empty_label.setStyleSheet(label_style("muted"))
         queue_layout.addWidget(self.queue_empty_label)
         main_layout.addWidget(queue_frame)
-
 
     def show_status(self, message: str, kind: str = "info"):
         styles = {
@@ -383,7 +422,7 @@ class GenerationPanel(QWidget):
             hide_ms = 0  # 不自动隐藏，需手动关闭
 
         # 清除旧 timer
-        if hasattr(self, '_hide_timer') and self._hide_timer:
+        if hasattr(self, "_hide_timer") and self._hide_timer:
             self._hide_timer.stop()
 
         if hide_ms > 0:
@@ -400,6 +439,7 @@ class GenerationPanel(QWidget):
         v_layout = QVBoxLayout()
         v_layout.setSpacing(8)
         lbl = QLabel(label)
+        self._param_labels[widget] = lbl
         lbl.setStyleSheet(label_style("muted"))
         v_layout.addWidget(lbl)
         v_layout.addWidget(widget)
@@ -415,6 +455,8 @@ class GenerationPanel(QWidget):
         self._update_config_state_ui()
 
     def set_sources(self, sources: list[dict], models_by_source: dict[str, list[dict]]):
+        if sources == self.sources and models_by_source == self.models_by_source:
+            return
         previous_source = self.current_source_id
         previous_model = self.current_model_id
         self.sources = sources
@@ -431,11 +473,15 @@ class GenerationPanel(QWidget):
 
     def _on_source_changed(self, index: int, preferred_model_id: str = ""):
         self.current_source_id = self.source_combo.itemData(index) or ""
+        source = next((item for item in self.sources if item.get("id") == self.current_source_id), {})
+        self.current_platform = adapter_id(source.get("interface_type", "openai_images"))
         models = self.models_by_source.get(self.current_source_id, [])
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         for model in models:
-            self.model_combo.addItem(model.get("display_name") or model.get("model_id"), model.get("id"))
+            self.model_combo.addItem(
+                str(model.get("display_name") or model.get("model_id") or "Model"), model.get("id")
+            )
         model_index = self.model_combo.findData(preferred_model_id)
         self.model_combo.setCurrentIndex(model_index if model_index >= 0 else (0 if models else -1))
         self.model_combo.blockSignals(False)
@@ -445,8 +491,34 @@ class GenerationPanel(QWidget):
         self.current_model_id = self.model_combo.itemData(index) or ""
         model = self._current_model()
         if model:
-            self.size_combo.setEditText(model.get("default_size") or "1024x1024")
-            self.quality_combo.setEditText(model.get("default_quality") or "standard")
+            source = next((item for item in self.sources if item.get("id") == self.current_source_id), {})
+            caps = model_capabilities(source.get("interface_type", "openai_images"), model.get("model_id", ""))
+            self.size_combo.clear()
+            self.size_combo.addItems(caps["sizes"])
+            self.quality_combo.clear()
+            self.quality_combo.addItems(caps["qualities"])
+            self.seed_input.setEnabled(caps["seed"])
+            self.negative_edit.setEnabled(caps["negative"])
+            self.negative_container.setVisible(caps["negative"])
+            self._param_labels[self.size_combo].setText(caps["size_label"])
+            self._param_labels[self.quality_combo].setText(caps["quality_label"])
+            self.quality_combo.setEnabled(len(caps["qualities"]) > 1)
+            self.format_combo.setEnabled(caps["format"])
+            self.transparent_check.setEnabled(caps["format"])
+            self.advanced_btn.setVisible(caps["format"])
+            self.advanced_frame.setVisible(caps["format"] and self.advanced_btn.isChecked())
+            self.image_btn.setEnabled(caps["reference"])
+            self.image_btn.setToolTip(
+                "选择参考图，生成时会发送给所选服务商" if caps["reference"] else "当前接口不支持参考图"
+            )
+            self.negative_edit.setPlaceholderText(
+                "排除不希望出现的内容" if caps["negative"] else "当前模型不支持独立反向提示词，请在主提示词中描述限制"
+            )
+            self.size_combo.setEditText(model.get("default_size") or caps["sizes"][0])
+            quality = model.get("default_quality") or caps["qualities"][0]
+            if str(model.get("model_id", "")).startswith("gpt-image-"):
+                quality = {"standard": "auto", "hd": "high"}.get(quality, quality)
+            self.quality_combo.setEditText(str(quality))
             count_index = self.count_combo.findText(str(model.get("default_n", 1)))
             if count_index >= 0:
                 self.count_combo.setCurrentIndex(count_index)
@@ -476,7 +548,7 @@ class GenerationPanel(QWidget):
     def _update_config_state_ui(self):
         configured = self._is_current_platform_configured()
         self.config_hint_frame.setVisible(not configured)
-        if hasattr(self, 'status_frame'):
+        if hasattr(self, "status_frame"):
             self.status_frame.setVisible(configured and bool(self.status_label.text()))
         self.config_hint_label.setText(self._current_config_hint())
         self.generate_btn.setEnabled(configured)
@@ -496,9 +568,7 @@ class GenerationPanel(QWidget):
         self.prompt_count_label.setText(f"{length} 字")
 
     def _select_reference_image(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择参考图片", "", "图片文件 (*.png *.jpg *.jpeg *.webp)"
-        )
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择参考图片", "", "图片文件 (*.png *.jpg *.jpeg *.webp)")
         if file_path:
             self.reference_image_path = file_path
             self._update_reference_image_ui()
@@ -523,12 +593,17 @@ class GenerationPanel(QWidget):
     def _get_params(self) -> dict:
         size_text = self.size_combo.currentText()
         size = normalize_size_value(size_text)
-        return {
+        params = {
             "size": size,
             "quality": self.quality_combo.currentText().strip() or "standard",
             "n": int(self.count_combo.currentText()),
-            "seed": self.seed_input.currentText() if self.seed_input.currentText() else None,
         }
+        if self.seed_input.isEnabled() and self.seed_input.currentText():
+            params["seed"] = self.seed_input.currentText()
+        if hasattr(self, "format_combo") and self.format_combo.isEnabled():
+            params["output_format"] = self.format_combo.currentText()
+            params["background"] = "transparent" if self.transparent_check.isChecked() else "auto"
+        return params
 
     def _build_task_data(self) -> dict:
         return {
@@ -551,6 +626,7 @@ class GenerationPanel(QWidget):
                 QMessageBox.warning(self, "\u63d0\u793a", "\u8bf7\u8f93\u5165 Prompt")
             return False
         return True
+
     def _add_to_queue(self):
         if not self._can_submit():
             return False
@@ -567,7 +643,10 @@ class GenerationPanel(QWidget):
         self.generate_btn.setText("\u751f\u6210\u4e2d\u2026")
         self.queue_btn.setEnabled(False)
         self.generate_signal.emit(self._build_task_data())
-        self.show_status("\u5df2\u63d0\u4ea4\u751f\u6210\u4efb\u52a1\uff0c\u8bf7\u7559\u610f\u961f\u5217\u72b6\u6001\u3002", "success")
+        self.show_status(
+            "\u5df2\u63d0\u4ea4\u751f\u6210\u4efb\u52a1\uff0c\u8bf7\u7559\u610f\u961f\u5217\u72b6\u6001\u3002",
+            "success",
+        )
         return True
 
     def _save_current_template(self):
@@ -599,6 +678,16 @@ class GenerationPanel(QWidget):
         return True
 
     def apply_template(self, template: dict):
+        source_id = template.get("source_id")
+        if source_id:
+            source_index = self.source_combo.findData(source_id)
+            if source_index < 0:
+                self.show_status("原来源已禁用或删除，请先选择可用的来源和模型。", "warning")
+            else:
+                self.source_combo.setCurrentIndex(source_index)
+                model_index = self.model_combo.findData(template.get("model_config_id"))
+                if model_index >= 0:
+                    self.model_combo.setCurrentIndex(model_index)
         self.prompt_edit.setPlainText(template.get("prompt", ""))
         self.negative_edit.setPlainText(template.get("negative_prompt", ""))
         params = dict(template.get("params") or {})
@@ -622,16 +711,6 @@ class GenerationPanel(QWidget):
                 self.count_combo.setCurrentIndex(index)
         if params.get("seed"):
             self.seed_input.setEditText(str(params["seed"]))
-        platform_id = template.get("platform_id")
-        source_id = template.get("source_id")
-        model_config_id = template.get("model_config_id")
-        if source_id:
-            source_index = self.source_combo.findData(source_id)
-            if source_index >= 0:
-                self.source_combo.setCurrentIndex(source_index)
-                model_index = self.model_combo.findData(model_config_id)
-                if model_index >= 0:
-                    self.model_combo.setCurrentIndex(model_index)
         self.show_status("\u6a21\u677f\u5185\u5bb9\u5df2\u586b\u5165\u751f\u6210\u533a\u3002", "success")
 
     def update_diagnostic(self, diagnostic: Diagnostic | dict | None, expand: bool = False):
@@ -663,14 +742,14 @@ class GenerationPanel(QWidget):
         """显示历史诊断记录列表，最多 8 条。"""
         while self.diagnostic_history_layout.count():
             item = self.diagnostic_history_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget() if item else None
+            if widget:
+                widget.deleteLater()
 
         if not records:
             self.diagnostic_history_container.setVisible(False)
             return
 
-        self.diagnostic_frame.setVisible(True)
         for record in records[:8]:
             diag_obj = Diagnostic.from_dict(record.get("diagnostic") or record)
             card = DiagnosticCard(diag_obj, parent=self.diagnostic_history_container)
@@ -714,8 +793,8 @@ class GenerationPanel(QWidget):
         for i in range(self.queue_container.count()):
             item = self.queue_container.itemAt(i)
             w = item.widget() if item else None
-            if w and hasattr(w, '_task_id'):
-                existing_ids[w._task_id] = w
+            if w and hasattr(w, "_task_id"):
+                existing_ids[getattr(w, "_task_id", "")] = w
 
         new_ids = {t.get("task_id") for t in task_dicts}
 
@@ -739,10 +818,12 @@ class GenerationPanel(QWidget):
             if tid not in existing_ids:
                 card = TaskCard(task)
                 card.setMinimumWidth(0)
-                card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 card._task_id = tid
                 card.cancel_signal.connect(self._cancel_task)
                 self.queue_container.addWidget(card)
+            else:
+                existing_ids[tid].update_task(task)
 
         # 重新添加 stretch
         self.queue_container.addStretch()

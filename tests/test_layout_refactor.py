@@ -256,6 +256,7 @@ def test_generation_panel_show_diagnostic_history_renders_records():
         {"prompt": "test prompt", "error": "timeout", "diagnostic": {"error": "timeout"}},
     ]
     panel.show_diagnostic_history(records)
+    panel._toggle_diagnostic_panel()
     assert panel.diagnostic_history_container.isVisible() is True
     assert panel.diagnostic_history_layout.count() >= 1
     panel.hide()

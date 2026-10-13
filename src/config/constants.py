@@ -1,7 +1,7 @@
 import os
 
 APP_NAME = "WHai Image Station"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 USER_HOME = os.path.expanduser("~")
 DEFAULT_SAVE_DIR = os.path.join(USER_HOME, "Pictures", "imageMaker")
@@ -20,13 +20,14 @@ TASK_STATUS = {
     "GENERATING": "生成中",
     "COMPLETED": "已完成",
     "FAILED": "失败",
+    "CANCELLED": "已取消",
 }
 
 PLATFORM_DEFAULTS = {
     "openai": {
-        "name": "DALL·E / OpenAI Compatible",
+        "name": "GPT Image / OpenAI Compatible",
         "api_base_url": "https://api.openai.com/v1",
-        "model_default": "dall-e-3",
+        "model_default": "gpt-image-2.5-flare",
     },
     "stability": {
         "name": "Stable Diffusion",

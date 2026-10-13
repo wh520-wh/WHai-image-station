@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
-    QFrame,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -63,7 +63,7 @@ class TaskChainEditor(QWidget):
         left_layout.setSpacing(12)
 
         title = QLabel("任务链")
-        title.setFont(app_font(14, QFont.Bold))
+        title.setFont(app_font(14, QFont.Weight.Bold))
         title.setStyleSheet(label_style("section"))
         left_layout.addWidget(title)
 
@@ -146,7 +146,7 @@ class TaskChainEditor(QWidget):
         chains = self.task_chain_manager.get_all_chains()
         for chain in chains:
             item = QListWidgetItem(chain.get("name", "未命名"))
-            item.setData(Qt.UserRole, chain.get("id"))
+            item.setData(Qt.ItemDataRole.UserRole, chain.get("id"))
             self.chain_list.addItem(item)
         if select_chain_id:
             self._select_chain_item(select_chain_id)
@@ -154,7 +154,7 @@ class TaskChainEditor(QWidget):
     def _select_chain_item(self, chain_id: str):
         for row in range(self.chain_list.count()):
             item = self.chain_list.item(row)
-            if item.data(Qt.UserRole) == chain_id:
+            if item.data(Qt.ItemDataRole.UserRole) == chain_id:
                 self.chain_list.setCurrentItem(item)
                 return
 
@@ -174,10 +174,10 @@ class TaskChainEditor(QWidget):
             self,
             "确认删除",
             "确定删除当前任务链吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         self.task_chain_manager.delete_chain(self._current_chain_id)
         self._current_chain_id = None
@@ -188,7 +188,7 @@ class TaskChainEditor(QWidget):
         self._update_action_state()
 
     def _on_chain_selected(self, item):
-        chain_id = item.data(Qt.UserRole)
+        chain_id = item.data(Qt.ItemDataRole.UserRole)
         chain = self.task_chain_manager.get_chain(chain_id)
         if not chain:
             return
@@ -206,9 +206,7 @@ class TaskChainEditor(QWidget):
 
     def _on_add_task(self):
         self._add_task_widget()
-        self.task_scroll.verticalScrollBar().setValue(
-            self.task_scroll.verticalScrollBar().maximum()
-        )
+        self.task_scroll.verticalScrollBar().setValue(self.task_scroll.verticalScrollBar().maximum())
 
     def _add_task_widget(self, task_data=None):
         task_widget = TaskItemWidget(
@@ -302,7 +300,7 @@ class TaskItemWidget(QFrame):
 
         header_layout = QHBoxLayout()
         title_label = QLabel("任务")
-        title_label.setFont(app_font(12, QFont.Bold))
+        title_label.setFont(app_font(12, QFont.Weight.Bold))
         title_label.setStyleSheet(label_style("section"))
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -325,7 +323,8 @@ class TaskItemWidget(QFrame):
         type_layout.addWidget(type_label)
 
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["prompt", "image_variation", "inpainting", "upscale"])
+        self.type_combo.addItem("prompt")
+        self.type_combo.setToolTip("当前任务链执行独立的图像生成任务。变体、局部重绘和放大需使用支持该能力的接口。")
         self.type_combo.setStyleSheet(input_style())
         type_layout.addWidget(self.type_combo)
         layout.addLayout(type_layout)
@@ -337,7 +336,7 @@ class TaskItemWidget(QFrame):
         layout.addWidget(self.prompt_edit)
 
         params_layout = QFormLayout()
-        params_layout.setLabelAlignment(Qt.AlignRight)
+        params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.neg_prompt = QLineEdit()
         self.neg_prompt.setPlaceholderText("反向提示词")

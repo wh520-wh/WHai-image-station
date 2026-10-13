@@ -6,8 +6,8 @@ from src.config import database
 class PromptManager:
     _instance: Optional["PromptManager"] = None
 
-    def __init__(self):
-        self._db: Optional[database.Database] = None
+    def __init__(self, db: database.Database | None = None):
+        self._db = db
 
     @classmethod
     def get_instance(cls) -> "PromptManager":
@@ -18,7 +18,7 @@ class PromptManager:
     async def initialize(self, db: database.Database):
         self._db = db
 
-    async def get_templates(self, category: str = None) -> list[dict]:
+    async def get_templates(self, category: str | None = None) -> list[dict]:
         if not self._db:
             return []
         return await self._db.get_prompt_templates(category)

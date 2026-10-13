@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -9,7 +8,7 @@ class PromptTemplate:
     name: str = ""
     prompt: str = ""
     negative_prompt: str = ""
-    platform_id: Optional[str] = None
+    platform_id: str | None = None
     params: dict = field(default_factory=dict)
     category: str = ""
     tags: str = ""

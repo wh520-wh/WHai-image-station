@@ -32,7 +32,7 @@ class Field:
         }
 
     @classmethod
-    def from_dict(cls, d: Any) -> "Field":
+    def from_dict(cls, d: Any) -> Field:
         if not isinstance(d, dict):
             return cls(name="(unknown)", value="(empty)", issue=str(d)[:200])
         return cls(
@@ -63,7 +63,7 @@ class Diagnostic:
         }
 
     @classmethod
-    def from_dict(cls, d: Any) -> "Diagnostic":
+    def from_dict(cls, d: Any) -> Diagnostic:
         if not isinstance(d, dict):
             # Non-dict path: unknown shape → aggressive cap.
             return cls(

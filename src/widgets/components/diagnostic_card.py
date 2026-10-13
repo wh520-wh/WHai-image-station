@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtWidgets import (
-    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QVBoxLayout, QWidget
-)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.adapters.errors import Category, Diagnostic
 from src.widgets.theme import COLORS, RADIUS, SPACING, app_font, apply_card_style, button_style, label_style
-
 
 CATEGORY_LABELS: dict[Category, str] = {
     Category.AUTH: "鉴权失败",
@@ -46,14 +52,14 @@ class DiagnosticCard(QFrame):
 
     def _setup_ui(self):
         apply_card_style(self, COLORS["panel_alt"])
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACING["md"], SPACING["sm"], SPACING["md"], SPACING["sm"])
         layout.setSpacing(SPACING["xs"])
 
         header = QHBoxLayout()
         self.badge_label = QLabel()
-        self.badge_label.setFont(app_font(10, QFont.Bold))
+        self.badge_label.setFont(app_font(10, QFont.Weight.Bold))
         header.addWidget(self.badge_label)
         header.addStretch()
 
@@ -71,7 +77,7 @@ class DiagnosticCard(QFrame):
 
         self.hint_label = QLabel()
         self.hint_label.setWordWrap(True)
-        self.hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.hint_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.hint_label.setStyleSheet(f"color: {COLORS['info']}; font-size: 11px;")
         layout.addWidget(self.hint_label)
 
@@ -85,7 +91,7 @@ class DiagnosticCard(QFrame):
 
         self.original_text = QLabel()
         self.original_text.setWordWrap(True)
-        self.original_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.original_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.original_text.setStyleSheet(f"color: {COLORS['muted']}; font-size: 10px;")
         self.original_text.setVisible(False)
         layout.addWidget(self.original_text)
@@ -98,6 +104,9 @@ class DiagnosticCard(QFrame):
         category = diag.category
         badge_text = CATEGORY_LABELS.get(category, category.value)
         color = CATEGORY_COLORS.get(category, COLORS.get("muted", "#888"))
+        if category == Category.UNKNOWN and not diag.original and diag.fields:
+            badge_text = "请求完成"
+            color = COLORS["success"]
         self.badge_label.setText(badge_text)
         self.badge_label.setStyleSheet(
             f"color: white; background: {color}; padding: 4px 10px; border-radius: {RADIUS['compact']}px;"
@@ -118,7 +127,7 @@ class DiagnosticCard(QFrame):
             name_lbl.setMinimumWidth(96)
             display_value = "***" if field.redact else field.value
             value_lbl = QLabel(display_value)
-            value_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             value_lbl.setStyleSheet(f"color: {COLORS['text']}; font-size: 11px;")
             issue_lbl = QLabel(f"— {field.issue}" if field.issue else "")
             issue_lbl.setStyleSheet(f"color: {COLORS['subtle']}; font-size: 11px;")
@@ -144,6 +153,4 @@ class DiagnosticCard(QFrame):
     def _on_copy(self):
         if not self._diagnostic:
             return
-        QApplication.clipboard().setText(
-            json.dumps(self._diagnostic.to_dict(), ensure_ascii=False, indent=2)
-        )
+        QApplication.clipboard().setText(json.dumps(self._diagnostic.to_dict(), ensure_ascii=False, indent=2))

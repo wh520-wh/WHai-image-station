@@ -1,27 +1,59 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import json
 from uuid import uuid4
 
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QHeaderView,
-    QSizePolicy, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
-
-import json
 
 from src.adapters import get_adapter
-from src.adapters.errors import Category, Diagnostic
+from src.adapters.errors import Diagnostic
 from src.config import constants, encryption
+from src.config.event_loop import schedule_async
+from src.config.providers import INTERFACE_LABELS, PROVIDER_PRESETS, adapter_id, make_preset, model_capabilities
 from src.config.utils import parse_headers, safe_int
+from src.managers.migration_manager import ExportOptions, ImportOptions
 from src.models.platform_config import PlatformConfig
 from src.widgets.components.diagnostic_card import DiagnosticCard
-from src.widgets.theme import COLORS, RADIUS, SPACING, app_font, apply_card_style, button_style, input_style, label_style, tab_style
-
+from src.widgets.theme import (
+    COLORS,
+    RADIUS,
+    SPACING,
+    app_font,
+    apply_card_style,
+    button_style,
+    input_style,
+    label_style,
+    tab_style,
+)
 
 AUTH_PRESET_LABELS = {
     "openai": "OpenAI / xAI / Cohere（Authorization: Bearer）",
@@ -30,6 +62,7 @@ AUTH_PRESET_LABELS = {
     "xai": "xAI Grok（Authorization: Bearer）",
     "cohere": "Cohere（Authorization: Bearer）",
     "custom": "自定义 / Custom（Authorization: Bearer）",
+    "bfl": "Black Forest Labs（x-key）",
 }
 
 RESPONSE_FORMAT_LABELS = {
@@ -46,6 +79,7 @@ class SettingsDialog(QDialog):
         self.sources: list[dict] = []
         self.models_by_source: dict[str, list[dict]] = {}
         self.current_source_id: str | None = None
+        self._draft_source_ids: set[str] = set()
         self._setup_ui()
         self._load_saved_configs()
 
@@ -56,11 +90,11 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(f"background: {COLORS['background']};")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(SPACING['xl'], SPACING['xl'], SPACING['xl'], SPACING['lg'])
+        root.setContentsMargins(SPACING["xl"], SPACING["xl"], SPACING["xl"], SPACING["lg"])
         root.setSpacing(16)
 
         title = QLabel("来源与模型")
-        title.setFont(app_font(17, QFont.Bold))
+        title.setFont(app_font(17, QFont.Weight.Bold))
         title.setStyleSheet(label_style("title"))
         root.addWidget(title)
 
@@ -68,24 +102,24 @@ class SettingsDialog(QDialog):
         self.tabs.setStyleSheet(
             tab_style().replace(
                 "QTabWidget::pane {",
-                f"QTabWidget::pane {{ background: {COLORS['panel']}; border: 1px solid {COLORS['border']}; border-radius: {RADIUS['control']}px; padding: {SPACING['lg']}px;"
+                f"QTabWidget::pane {{ background: {COLORS['panel']}; border: 1px solid {COLORS['border']}; border-radius: {RADIUS['control']}px; padding: {SPACING['lg']}px;",
             )
         )
         root.addWidget(self.tabs, 1)
 
-        button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         button_box.setStyleSheet(f"""
             QPushButton {{
-                background: {COLORS['panel']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                background: {COLORS["panel"]};
+                color: {COLORS["text"]};
+                border: 1px solid {COLORS["border"]};
                 border-radius: 12px;
                 padding: 8px 20px;
             }}
             QPushButton:hover {{
-                border-color: {COLORS['primary']};
-                color: {COLORS['primary']};
-                background: {COLORS['primary_soft']};
+                border-color: {COLORS["primary"]};
+                color: {COLORS["primary"]};
+                background: {COLORS["primary_soft"]};
             }}
         """)
         button_box.accepted.connect(self._save)
@@ -96,6 +130,10 @@ class SettingsDialog(QDialog):
         self.validation_card_container = QVBoxLayout()
         self.validation_card_container.setContentsMargins(0, 0, 0, 0)
         root.addLayout(self.validation_card_container)
+        self.feedback_label = QLabel()
+        self.feedback_label.setWordWrap(True)
+        self.feedback_label.setStyleSheet(label_style("muted"))
+        root.addWidget(self.feedback_label)
 
         self.source_tab = QWidget()
         self.tabs.addTab(self.source_tab, "来源与模型")
@@ -113,7 +151,7 @@ class SettingsDialog(QDialog):
     def _setup_source_tab(self):
         """Setup the sources & models tab content"""
         body = QHBoxLayout(self.source_tab)
-        body.setSpacing(SPACING['md'])
+        body.setSpacing(SPACING["md"])
         body.setContentsMargins(0, 0, 0, 0)
 
         left = QFrame()
@@ -131,8 +169,8 @@ class SettingsDialog(QDialog):
         self.source_list.setMinimumHeight(430)
         self.source_list.setStyleSheet(f"""
             QListWidget {{
-                background: {COLORS['panel']};
-                border: 1px solid {COLORS['border']};
+                background: {COLORS["panel"]};
+                border: 1px solid {COLORS["border"]};
                 border-radius: 12px;
                 padding: 6px;
             }}
@@ -142,39 +180,39 @@ class SettingsDialog(QDialog):
                 border-radius: 8px;
             }}
             QListWidget::item:selected {{
-                background: {COLORS['primary_soft']};
-                color: {COLORS['primary']};
+                background: {COLORS["primary_soft"]};
+                color: {COLORS["primary"]};
                 font-weight: 700;
             }}
         """)
         self.source_list.currentItemChanged.connect(self._on_source_selected)
         left_layout.addWidget(self.source_list, 1)
         self.primary_source_actions = QHBoxLayout()
-        self.primary_source_actions.setSpacing(SPACING['sm'])
+        self.primary_source_actions.setSpacing(SPACING["sm"])
         add_source_btn = QPushButton("新增来源")
-        add_source_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        add_source_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         add_source_btn.setStyleSheet(button_style("primary"))
         add_source_btn.clicked.connect(self._add_source)
         self.primary_source_actions.addWidget(add_source_btn)
         left_layout.addLayout(self.primary_source_actions)
 
         self.maintenance_source_actions = QHBoxLayout()
-        self.maintenance_source_actions.setSpacing(SPACING['sm'])
+        self.maintenance_source_actions.setSpacing(SPACING["sm"])
         backup_btn = QPushButton("备份配置")
-        backup_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        backup_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         backup_btn.setStyleSheet(button_style("ghost"))
         backup_btn.clicked.connect(self._backup_config)
         self.maintenance_source_actions.addWidget(backup_btn)
         left_layout.addLayout(self.maintenance_source_actions)
 
         self.danger_source_actions = QHBoxLayout()
-        self.danger_source_actions.setSpacing(SPACING['sm'])
+        self.danger_source_actions.setSpacing(SPACING["sm"])
         delete_source_btn = QPushButton("删除来源")
-        delete_source_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        delete_source_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         delete_source_btn.setStyleSheet(button_style("danger_ghost"))
         delete_source_btn.clicked.connect(self._delete_current_source)
         reset_btn = QPushButton("重置配置")
-        reset_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        reset_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         reset_btn.setStyleSheet(button_style("danger_ghost"))
         reset_btn.clicked.connect(self._reset_config)
         self.danger_source_actions.addWidget(delete_source_btn)
@@ -184,14 +222,14 @@ class SettingsDialog(QDialog):
         right = QFrame()
         apply_card_style(right)
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(SPACING['lg'], SPACING['lg'], SPACING['lg'], SPACING['lg'])
+        right_layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
         right_layout.setSpacing(16)
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
         right_scroll.setWidget(right)
-        self.source_splitter = QSplitter(Qt.Horizontal)
+        self.source_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.source_splitter.addWidget(left)
         self.source_splitter.addWidget(right_scroll)
         self.source_splitter.setStretchFactor(0, 1)
@@ -202,9 +240,28 @@ class SettingsDialog(QDialog):
         source_title = QLabel("来源详情")
         source_title.setStyleSheet(label_style("section"))
         right_layout.addWidget(source_title)
+        preset_row = QHBoxLayout()
+        self.preset_combo = QComboBox()
+        self.preset_combo.setStyleSheet(input_style())
+        for preset_id, preset in PROVIDER_PRESETS.items():
+            self.preset_combo.addItem(preset["name"], preset_id)
+        preset_row.addWidget(self.preset_combo, 1)
+        self.add_preset_btn = QPushButton("添加来源预设")
+        self.add_preset_btn.setStyleSheet(button_style("primary"))
+        self.add_preset_btn.clicked.connect(self._add_preset)
+        preset_row.addWidget(self.add_preset_btn)
+        self.docs_btn = QPushButton("官方文档")
+        self.docs_btn.setStyleSheet(button_style("ghost"))
+        self.docs_btn.clicked.connect(self._open_provider_docs)
+        preset_row.addWidget(self.docs_btn)
+        right_layout.addLayout(preset_row)
+        preset_hint = QLabel("预设已核对至 2026-10-12。填入 API Key 即可配置；账户须具有对应模型权限。")
+        preset_hint.setWordWrap(True)
+        preset_hint.setStyleSheet(label_style("muted"))
+        right_layout.addWidget(preset_hint)
 
         self.source_grid = QGridLayout()
-        self.source_grid.setHorizontalSpacing(SPACING['md'])
+        self.source_grid.setHorizontalSpacing(SPACING["md"])
         self.source_grid.setVerticalSpacing(12)
         self.source_grid.setColumnMinimumWidth(0, 92)
         self.source_grid.setColumnStretch(1, 1)
@@ -213,8 +270,8 @@ class SettingsDialog(QDialog):
         self.name_input = self._line_edit("source_name", "例如：dm-fox 中转站")
         self.name_input.setToolTip("来源显示名称，用于在界面上标识此 API 服务商")
         self.interface_combo = QComboBox()
-        self.interface_combo.addItem("OpenAI 图像生成", "openai_images")
-        self.interface_combo.addItem("自定义 / Custom（不拼接端点路径）", "custom")
+        for key, label in INTERFACE_LABELS.items():
+            self.interface_combo.addItem(label, key)
         self.interface_combo.setStyleSheet(input_style())
         self.interface_combo.setMinimumHeight(38)
         self.interface_combo.currentIndexChanged.connect(self._on_interface_type_changed)
@@ -249,14 +306,17 @@ class SettingsDialog(QDialog):
         proxy_row = QWidget()
         proxy_layout = QHBoxLayout(proxy_row)
         proxy_layout.setContentsMargins(0, 0, 0, 0)
-        proxy_layout.setSpacing(SPACING['sm'])
+        proxy_layout.setSpacing(SPACING["sm"])
         proxy_layout.addWidget(self.proxy_input, 1)
         proxy_layout.addWidget(self.proxy_check)
 
         fields = [
-            ("名称", self.name_input), ("接口格式", self.interface_combo),
-            ("鉴权预设", self.auth_combo), ("Base URL", self.url_input),
-            ("API Key", self.key_input), ("代理", proxy_row),
+            ("名称", self.name_input),
+            ("接口格式", self.interface_combo),
+            ("鉴权预设", self.auth_combo),
+            ("Base URL", self.url_input),
+            ("API Key", self.key_input),
+            ("代理", proxy_row),
         ]
         self._response_format_row = 2
         for index, (label, widget) in enumerate(fields):
@@ -271,11 +331,19 @@ class SettingsDialog(QDialog):
         self.url_preview = QLabel()
         self.url_preview.setObjectName("url_preview_openai")
         self.url_preview.setStyleSheet(label_style("muted"))
-        self.url_input.textChanged.connect(lambda: self._update_url_preview(self.interface_combo.currentData() or "openai_images"))
+        self.url_input.textChanged.connect(
+            lambda: self._update_url_preview(self.interface_combo.currentData() or "openai_images")
+        )
         self.url_preview.setMinimumHeight(28)
         self.url_preview.setContentsMargins(8, 4, 8, 4)
-        self.url_preview.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px; background: {COLORS['panel_alt']}; border-radius: 8px; padding: 6px;")
+        self.url_preview.setStyleSheet(
+            f"color: {COLORS['muted']}; font-size: 11px; background: {COLORS['panel_alt']}; border-radius: 8px; padding: 6px;"
+        )
         right_layout.addWidget(self.url_preview)
+        self.validate_btn = QPushButton("检查配置")
+        self.validate_btn.setStyleSheet(button_style("secondary"))
+        self.validate_btn.clicked.connect(self._validate_source)
+        right_layout.addWidget(self.validate_btn)
 
         headers_label = QLabel("来源级 Headers（高级，可覆盖自动鉴权 Header）")
         headers_label.setStyleSheet(label_style("section"))
@@ -285,8 +353,8 @@ class SettingsDialog(QDialog):
         self.header_table.setHorizontalHeaderLabels(["Key", "Value"])
         self.header_table.setMinimumHeight(150)
         self.header_table.verticalHeader().setDefaultSectionSize(34)
-        self.header_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.header_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.header_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.header_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.header_table.setStyleSheet(self._table_style())
         right_layout.addWidget(self.header_table)
         add_header_btn = QPushButton("+ 添加 Header")
@@ -313,21 +381,27 @@ class SettingsDialog(QDialog):
         self.model_table.setObjectName("model_openai")
         self.model_table.setHorizontalHeaderLabels(["显示名", "Model ID", "默认尺寸", "默认质量", "数量"])
         self.model_table.setMinimumHeight(210)
-        self.model_table.setDragDropMode(QAbstractItemView.InternalMove)
+        self.model_table.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.model_table.setDragDropOverwriteMode(False)
-        self.model_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.model_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.model_table.verticalHeader().setDefaultSectionSize(36)
-        self.model_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.model_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.model_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.model_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.model_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.model_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.model_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.model_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.model_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.model_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.model_table.setStyleSheet(self._table_style())
-        self.model_table.horizontalHeaderItem(0).setToolTip("模型在界面上的显示名称，支持中文")
-        self.model_table.horizontalHeaderItem(1).setToolTip("发送给 API 的模型 ID，必须与 API 文档一致（如 gpt-image-1）")
-        self.model_table.horizontalHeaderItem(2).setToolTip("生成图片的默认尺寸")
-        self.model_table.horizontalHeaderItem(3).setToolTip("生成图片的质量级别，高质量可能耗时更长")
-        self.model_table.horizontalHeaderItem(4).setToolTip("单次请求生成的图片数量")
+        tooltips = [
+            "模型在界面上的显示名称，支持中文",
+            "发送给 API 的模型 ID，必须与服务商文档一致",
+            "生成图片的默认尺寸",
+            "生成图片的质量级别，高质量可能耗时更长",
+            "单次请求生成的图片数量",
+        ]
+        for index, tooltip in enumerate(tooltips):
+            header = self.model_table.horizontalHeaderItem(index)
+            if header:
+                header.setToolTip(tooltip)
         right_layout.addWidget(self.model_table)
 
         self._update_url_preview("openai_images")
@@ -388,22 +462,22 @@ class SettingsDialog(QDialog):
         line_edit.setStyleSheet(input_style())
         line_edit.setMinimumHeight(38)
         if password:
-            line_edit.setEchoMode(QLineEdit.Password)
+            line_edit.setEchoMode(QLineEdit.EchoMode.Password)
         return line_edit
 
     def _table_style(self) -> str:
         return f"""
         QTableWidget {{
-            background: {COLORS['panel']};
-            border: 1px solid {COLORS['border']};
+            background: {COLORS["panel"]};
+            border: 1px solid {COLORS["border"]};
             border-radius: 12px;
-            gridline-color: {COLORS['border']};
-            selection-background-color: {COLORS['primary_soft']};
-            selection-color: {COLORS['text']};
+            gridline-color: {COLORS["border"]};
+            selection-background-color: {COLORS["primary_soft"]};
+            selection-color: {COLORS["text"]};
         }}
         QHeaderView::section {{
-            background: {COLORS['panel_alt']};
-            color: {COLORS['muted']};
+            background: {COLORS["panel_alt"]};
+            color: {COLORS["muted"]};
             border: none;
             padding: 8px;
             font-weight: 700;
@@ -419,11 +493,11 @@ class SettingsDialog(QDialog):
             self._refresh_source_list()
             return
         from src.config.event_loop import run_async
+
         run_async(self.db.migrate_legacy_openai_config())
         self.sources = run_async(self.db.get_sources())
         self.models_by_source = {
-            source["id"]: run_async(self.db.get_source_models(source["id"]))
-            for source in self.sources
+            source["id"]: run_async(self.db.get_source_models(source["id"])) for source in self.sources
         }
         self._ensure_draft_source()
         self._refresh_source_list()
@@ -432,13 +506,75 @@ class SettingsDialog(QDialog):
         if self.sources:
             return
         source_id = f"src_{uuid4().hex}"
-        self.sources = [{
-            "id": source_id, "name": "OpenAI 官方", "interface_type": "openai_images",
-            "auth_preset": "openai", "response_format": "openai",
-            "api_base_url": constants.PLATFORM_DEFAULTS["openai"]["api_base_url"],
-            "api_key_encrypted": None, "custom_headers": "{}", "proxy": None, "is_active": 1,
-        }]
-        self.models_by_source[source_id] = []
+        source, models = make_preset("openai", source_id)
+        self._draft_source_ids.add(source_id)
+        self.sources = [source]
+        self.models_by_source[source_id] = models
+
+    def _add_preset(self):
+        self._capture_current_source()
+        source_id = f"src_{uuid4().hex}"
+        source, models = make_preset(self.preset_combo.currentData(), source_id)
+        if (
+            len(self.sources) == 1
+            and self.sources[0]["id"] in self._draft_source_ids
+            and not self.sources[0].get("api_key")
+        ):
+            draft_id = self.sources[0]["id"]
+            self.sources.clear()
+            self.models_by_source.pop(draft_id, None)
+            self.current_source_id = None
+        self.sources.append(source)
+        self.models_by_source[source_id] = models
+        self._refresh_source_list()
+        self.source_list.setCurrentRow(self.source_list.count() - 1)
+        self.feedback_label.setText(f"已添加 {source['name']}，填写 API Key 后保存。")
+
+    def _open_provider_docs(self):
+        url = PROVIDER_PRESETS[self.preset_combo.currentData()].get("docs_url")
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _validate_source(self):
+        interface = self.interface_combo.currentData()
+        key = adapter_id(interface)
+        registered = get_adapter(key)
+        if not registered:
+            self.feedback_label.setText("此接口尚未启用，请先重新启动应用。")
+            return
+        config = self._build_config_from_fields(key, self.name_input.text())
+        models = self._models_from_table(self.current_source_id or "")
+        config.model_name = models[0]["model_id"] if models else ""
+        if not config.api_base_url or not config.model_name:
+            self.feedback_label.setText("请填写 Base URL，并添加至少一个模型 ID。")
+            return
+        self.validate_btn.setEnabled(False)
+        self.feedback_label.setText("正在检查配置…")
+
+        async def validate():
+            adapter = type(registered)()
+            try:
+                return await adapter.validate_config(config)
+            finally:
+                await adapter.close()
+
+        def done(valid):
+            self.validate_btn.setEnabled(True)
+            self.feedback_label.setText(
+                (
+                    "参数检查通过，服务商权限将在首次生成时验证。"
+                    if interface in {"bfl", "minimax", "custom"}
+                    else "连接与鉴权检查通过。"
+                )
+                if valid
+                else "检查未通过，请核对 API Key、地址和模型权限。"
+            )
+
+        def failed(error):
+            self.validate_btn.setEnabled(True)
+            self.feedback_label.setText(f"检查失败：{str(error)[:300]}")
+
+        schedule_async(validate(), on_success=done, on_error=failed)
 
     def _refresh_source_list(self):
         self.source_list.clear()
@@ -459,9 +595,13 @@ class SettingsDialog(QDialog):
         if not source:
             return
         self.name_input.setText(source.get("name", ""))
-        self.interface_combo.setCurrentIndex(max(0, self.interface_combo.findData(source.get("interface_type", "openai_images"))))
+        self.interface_combo.setCurrentIndex(
+            max(0, self.interface_combo.findData(source.get("interface_type", "openai_images")))
+        )
         self.auth_combo.setCurrentIndex(max(0, self.auth_combo.findData(source.get("auth_preset", "openai"))))
-        self.response_format_combo.setCurrentIndex(max(0, self.response_format_combo.findData(source.get("response_format", "openai"))))
+        self.response_format_combo.setCurrentIndex(
+            max(0, self.response_format_combo.findData(source.get("response_format", "openai")))
+        )
         self.url_input.setText(source.get("api_base_url", ""))
         if source.get("api_key_encrypted"):
             try:
@@ -475,7 +615,7 @@ class SettingsDialog(QDialog):
         self.proxy_input.setText(proxy)
         self.active_check.setChecked(bool(source.get("is_active", 1)))
         self._fill_header_table(parse_headers(source.get("custom_headers")))
-        self._fill_model_table(self.models_by_source.get(self.current_source_id, []))
+        self._fill_model_table(self.models_by_source.get(self.current_source_id or "", []))
         self._update_url_preview(self.interface_combo.currentData() or "openai_images")
 
     def _current_source(self) -> dict | None:
@@ -485,28 +625,38 @@ class SettingsDialog(QDialog):
         source = self._current_source()
         if not source:
             return
-        source.update({
-            "name": self.name_input.text().strip() or "未命名来源",
-            "interface_type": self.interface_combo.currentData() or "openai_images",
-            "auth_preset": self.auth_combo.currentData() or "openai",
-            "response_format": self.response_format_combo.currentData() or "openai",
-            "api_base_url": self.url_input.text().strip(),
-            "api_key": self.key_input.text(),
-            "custom_headers": json.dumps(self._headers_from_table(), ensure_ascii=False),
-            "proxy": self.proxy_input.text().strip() if self.proxy_check.isChecked() else None,
-            "is_active": 1 if self.active_check.isChecked() else 0,
-        })
+        source.update(
+            {
+                "name": self.name_input.text().strip() or "未命名来源",
+                "interface_type": self.interface_combo.currentData() or "openai_images",
+                "auth_preset": self.auth_combo.currentData() or "openai",
+                "response_format": self.response_format_combo.currentData() or "openai",
+                "api_base_url": self.url_input.text().strip(),
+                "api_key": self.key_input.text(),
+                "custom_headers": json.dumps(self._headers_from_table(), ensure_ascii=False),
+                "proxy": self.proxy_input.text().strip() if self.proxy_check.isChecked() else None,
+                "is_active": 1 if self.active_check.isChecked() else 0,
+            }
+        )
         self.models_by_source[source["id"]] = self._models_from_table(source["id"])
 
     def _add_source(self):
         self._capture_current_source()
         source_id = f"src_{uuid4().hex}"
-        self.sources.append({
-            "id": source_id, "name": "新来源", "interface_type": "openai_images",
-            "auth_preset": "openai", "response_format": "openai",
-            "api_base_url": "", "api_key_encrypted": None,
-            "custom_headers": "{}", "proxy": None, "is_active": 1,
-        })
+        self.sources.append(
+            {
+                "id": source_id,
+                "name": "新来源",
+                "interface_type": "openai_images",
+                "auth_preset": "openai",
+                "response_format": "openai",
+                "api_base_url": "",
+                "api_key_encrypted": None,
+                "custom_headers": "{}",
+                "proxy": None,
+                "is_active": 1,
+            }
+        )
         self.models_by_source[source_id] = []
         self._refresh_source_list()
         self.source_list.setCurrentRow(self.source_list.count() - 1)
@@ -515,10 +665,13 @@ class SettingsDialog(QDialog):
         if not self.current_source_id:
             return
         reply = QMessageBox.question(
-            self, "确认删除", "确定要删除当前来源及其所有模型配置吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self,
+            "确认删除",
+            "确定要删除当前来源及其所有模型配置吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         self.sources = [source for source in self.sources if source["id"] != self.current_source_id]
         self.models_by_source.pop(self.current_source_id, None)
@@ -577,18 +730,27 @@ class SettingsDialog(QDialog):
             model_item = self.model_table.item(row, 1)
             if not model_item or not model_item.text().strip():
                 continue
-            display_name = display_item.text().strip() if display_item and display_item.text().strip() else model_item.text().strip()
-            models.append({
-                "id": display_item.data(256) if display_item and display_item.data(256) else f"mdl_{uuid4().hex}",
-                "source_id": source_id,
-                "display_name": display_name,
-                "model_id": model_item.text().strip(),
-                "default_size": self._table_text(row, 2) or "1024x1024",
-                "default_quality": self._table_text(row, 3) or "standard",
-                "default_n": safe_int(self._table_text(row, 4), 1),
-                "sort_order": row,
-                "is_active": 1,
-            })
+            display_name = (
+                display_item.text().strip()
+                if display_item and display_item.text().strip()
+                else model_item.text().strip()
+            )
+            models.append(
+                {
+                    "id": display_item.data(256) if display_item and display_item.data(256) else f"mdl_{uuid4().hex}",
+                    "source_id": source_id,
+                    "display_name": display_name,
+                    "model_id": model_item.text().strip(),
+                    "default_size": self._table_text(row, 2) or "1024x1024",
+                    "default_quality": self._table_text(row, 3) or "standard",
+                    "default_n": safe_int(self._table_text(row, 4), 1),
+                    "sort_order": row,
+                    "is_active": 1,
+                    "reference_image_enabled": model_capabilities(
+                        self.interface_combo.currentData(), model_item.text().strip()
+                    )["reference"],
+                }
+            )
         return models
 
     def _table_text(self, row: int, col: int) -> str:
@@ -610,14 +772,19 @@ class SettingsDialog(QDialog):
             self.validation_card = None
 
     def _build_generation_url_preview(self, platform_id: str, base_url: str) -> str:
-        adapter_key = "openai" if platform_id == "openai_images" else platform_id
+        adapter_key = adapter_id(platform_id)
         adapter = get_adapter(adapter_key)
-        resolved_base_url = (base_url or constants.PLATFORM_DEFAULTS.get(platform_id, {}).get("api_base_url", "")).strip()
+        resolved_base_url = (
+            base_url or constants.PLATFORM_DEFAULTS.get(platform_id, {}).get("api_base_url", "")
+        ).strip()
         if not adapter or not resolved_base_url:
             return "实际请求: -"
         if adapter_key == "custom":
             return f"实际请求: {resolved_base_url}（完整地址，不追加路径）"
-        return f"实际请求: {adapter.build_url(resolved_base_url, '/images/generations')}"
+        endpoint = {"gemini": "/interactions", "minimax": "/image_generation", "bfl": "/{模型 ID}"}.get(
+            adapter_key, "/images/generations"
+        )
+        return f"实际请求: {adapter.build_url(resolved_base_url, endpoint)}"
 
     def _update_url_preview(self, platform_id: str):
         self.url_preview.setText(self._build_generation_url_preview(platform_id, self.url_input.text()))
@@ -648,7 +815,7 @@ class SettingsDialog(QDialog):
             self.url_input.setPlaceholderText("https://example.com/v1")
         self._update_url_preview(iface or "openai_images")
 
-    def _build_config_from_fields(self, platform_id: str, platform_name: str) -> PlatformConfig | None:
+    def _build_config_from_fields(self, platform_id: str, platform_name: str) -> PlatformConfig:
         return PlatformConfig(
             id=platform_id,
             name=platform_name,
@@ -662,14 +829,25 @@ class SettingsDialog(QDialog):
             is_active=self.active_check.isChecked(),
         )
 
-
     def _build_backup_payload(self) -> dict:
         self._capture_current_source()
         return {
             "version": 1,
             "sources": [
                 {
-                    key: value
+                    key: (
+                        json.dumps(
+                            {
+                                k: v
+                                for k, v in parse_headers(value).items()
+                                if not any(
+                                    word in k.lower() for word in ("key", "token", "authorization", "cookie", "secret")
+                                )
+                            }
+                        )
+                        if key == "custom_headers"
+                        else value
+                    )
                     for key, value in source.items()
                     if key not in {"api_key", "api_key_encrypted"}
                 }
@@ -688,7 +866,7 @@ class SettingsDialog(QDialog):
 
     def _reset_config(self):
         ok = QMessageBox.question(self, "重置配置", "确定清空当前来源和模型配置吗？历史图片不会删除。")
-        if ok != QMessageBox.Yes:
+        if ok != QMessageBox.StandardButton.Yes:
             return
         self.sources = []
         self.models_by_source = {}
@@ -702,6 +880,7 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "保存失败", "数据库尚未初始化，无法保存配置")
             return
         from src.config.event_loop import run_async
+
         existing_sources = run_async(self.db.get_sources())
         existing_ids = {source["id"] for source in existing_sources}
         current_ids = {source["id"] for source in self.sources}
@@ -710,7 +889,9 @@ class SettingsDialog(QDialog):
         for source in self.sources:
             saved_source = dict(source)
             api_key = saved_source.pop("api_key", "")
-            saved_source["api_key_encrypted"] = encryption.encrypt(api_key) if api_key else source.get("api_key_encrypted")
+            saved_source["api_key_encrypted"] = (
+                encryption.encrypt(api_key) if api_key else source.get("api_key_encrypted")
+            )
             run_async(self.db.save_source(saved_source))
             existing_models = run_async(self.db.get_source_models(source["id"]))
             existing_model_ids = {model["id"] for model in existing_models}
@@ -725,14 +906,15 @@ class SettingsDialog(QDialog):
 
     def _get_migration_manager(self):
         """Get or create MigrationManager instance"""
-        if not hasattr(self, 'migration_manager') or self.migration_manager is None:
-            from src.managers.migration_manager import MigrationManager
+        if not hasattr(self, "migration_manager") or self.migration_manager is None:
             from src.managers.history_manager import HistoryManager
+            from src.managers.migration_manager import MigrationManager
             from src.managers.prompt_manager import PromptManager
+
             history_mgr = HistoryManager(self.db)
             prompt_mgr = PromptManager(self.db)
             # KeyVault would be needed for key backup, using a placeholder
-            key_vault = MagicMock() if hasattr(self, 'key_vault') else None
+            key_vault = getattr(self, "key_vault", None)
             self.migration_manager = MigrationManager(self.db, history_mgr, prompt_mgr, key_vault)
         return self.migration_manager
 
@@ -745,41 +927,61 @@ class SettingsDialog(QDialog):
             return
 
         from src.managers.migration_manager import ExportOptions
-        from src.config.event_loop import run_async
 
         options = ExportOptions(
             include_history=True,
             include_templates=True,
             include_sources=True,
             include_settings=True,
-            include_keys=False
+            include_keys=False,
         )
         try:
-            run_async(self._get_migration_manager().export(path, options))
-            QMessageBox.information(self, "导出成功", f"数据已导出到:\n{path}")
+            manager = self._get_migration_manager()
+            self.export_btn.setEnabled(False)
+            self.feedback_label.setText("正在导出数据与图片…")
+
+            def done(_):
+                self.export_btn.setEnabled(True)
+                self.feedback_label.setText(f"备份已保存：{path}（不含密钥）")
+
+            def failed(error):
+                self.export_btn.setEnabled(True)
+                self.feedback_label.setText(f"导出失败：{error}")
+
+            schedule_async(manager.export(path, options), on_success=done, on_error=failed)
         except Exception as e:
             QMessageBox.warning(self, "导出失败", f"导出时出错:\n{str(e)}")
 
     def _on_import(self):
         """Handle import button click"""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "导入数据", "", "备份文件 (*.imbackup);;所有文件 (*.*)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "导入数据", "", "备份文件 (*.imbackup);;所有文件 (*.*)")
         if not path:
             return
 
-        from src.managers.migration_manager import ImportOptions, ImportResult
         from src.config.event_loop import run_async
+        from src.managers.migration_manager import ImportOptions
 
-        preview = run_async(self._get_migration_manager().preview(path))
-        msg = QMessageBox(self)
-        msg.setWindowTitle("导入预览")
-        msg.setText(f"备份文件内容:\n\n历史记录: {preview.history_count} 条\n"
-                   f"模板: {preview.template_count} 条\n"
-                   f"来源: {preview.source_count} 个\n"
-                   f"密钥: {'有' if preview.has_keys else '无'}\n\n确定要导入吗？")
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        if msg.exec() != QMessageBox.Yes:
+        try:
+            preview = run_async(self._get_migration_manager().preview(path))
+        except Exception as error:
+            QMessageBox.warning(self, "无法读取备份", str(error))
+            return
+        message = (
+            f"备份文件内容:\n\n历史记录: {preview.history_count} 条\n"
+            f"模板: {preview.template_count} 条\n"
+            f"来源: {preview.source_count} 个\n"
+            f"密钥: {'有' if preview.has_keys else '无'}\n\n确定要导入吗？"
+        )
+        if (
+            QMessageBox.question(
+                self,
+                "导入预览",
+                message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
 
         options = ImportOptions(
@@ -788,21 +990,68 @@ class SettingsDialog(QDialog):
             include_sources=True,
             include_settings=True,
             include_keys=False,
-            conflict_mode="keep"
+            conflict_mode="keep",
         )
         try:
-            result = run_async(self._get_migration_manager().import_data(path, options))
-            QMessageBox.information(self, "导入成功",
-                f"导入完成:\n\n历史记录: {result.imported_history} 条\n"
-                f"模板: {result.imported_templates} 条\n"
-                f"来源: {result.imported_sources} 个")
+            self.import_btn.setEnabled(False)
+
+            def done(result):
+                self.import_btn.setEnabled(True)
+                self.feedback_label.setText(
+                    f"导入完成：历史 {result.imported_history} 条，模板 {result.imported_templates} 条，来源 {result.imported_sources} 个。"
+                )
+                self._load_saved_configs()
+
+            def failed(error):
+                self.import_btn.setEnabled(True)
+                self.feedback_label.setText(f"导入失败：{error}")
+
+            schedule_async(self._get_migration_manager().import_data(path, options), on_success=done, on_error=failed)
         except Exception as e:
             QMessageBox.warning(self, "导入失败", f"导入时出错:\n{str(e)}")
 
     def _on_export_keys(self):
-        """Handle export keys button click"""
-        QMessageBox.information(self, "导出密钥", "密钥导出功能开发中")
+        self._key_backup(False)
 
     def _on_import_keys(self):
-        """Handle import keys button click"""
-        QMessageBox.information(self, "导入密钥", "密钥导入功能开发中")
+        self._key_backup(True)
+
+    def _key_backup(self, importing: bool):
+        title = "导入密钥备份" if importing else "导出密钥备份"
+        picker = QFileDialog.getOpenFileName if importing else QFileDialog.getSaveFileName
+        path, _ = picker(self, title, "" if importing else "WHai-keys.imbackup", "密钥备份 (*.imbackup)")
+        if not path:
+            return
+        password, accepted = QInputDialog.getText(
+            self, title, "备份密码（至少 8 位，导入时使用导出密码）", QLineEdit.EchoMode.Password
+        )
+        if not accepted:
+            return
+        if len(password) < 8:
+            self.feedback_label.setText("备份密码至少需要 8 位。")
+            return
+        manager = self._get_migration_manager()
+        if importing:
+            options = ImportOptions(
+                include_history=False,
+                include_templates=False,
+                include_settings=False,
+                include_keys=True,
+                key_password=password,
+                conflict_mode="overwrite",
+            )
+            operation = manager.import_data(path, options)
+        else:
+            options = ExportOptions(
+                include_history=False,
+                include_templates=False,
+                include_settings=False,
+                include_keys=True,
+                key_password=password,
+            )
+            operation = manager.export(path, options)
+        schedule_async(
+            operation,
+            on_success=lambda _: self.feedback_label.setText(f"{title}完成。"),
+            on_error=lambda error: self.feedback_label.setText(f"{title}失败：{error}"),
+        )

@@ -1,6 +1,6 @@
-import os
 import hashlib
-import base64
+import os
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 _master_key = None
@@ -9,6 +9,7 @@ _master_key = None
 def _get_machine_fingerprint() -> bytes:
     """根据机器信息生成唯一指纹"""
     import uuid
+
     cpu_id = str(uuid.getnode())
     board_id = str(uuid.UUID(int=uuid.getnode()))
     combined = f"{cpu_id}-{board_id}".encode()

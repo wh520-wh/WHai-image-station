@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -17,13 +16,13 @@ class HistoryRecord:
     thumbnail_path: str = ""
     seed: str = ""
     status: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     request_url: str = ""
     request_payload: dict = field(default_factory=dict)
     response_summary: str = ""
     diagnostic: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
 
     def to_dict(self) -> dict:
         return {

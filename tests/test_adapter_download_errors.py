@@ -17,6 +17,9 @@ class _DummyAdapter(BaseAdapter):
 async def test_download_image_raises_typed_exception_on_http_error(tmp_path):
     adapter = _DummyAdapter()
     config = MagicMock()
+    config.proxy = None
+    config.api_base_url = "http://example.com"
+    config.auth_preset = "openai"
     config.api_key = "key"
     config.custom_headers = None
     mock_response = MagicMock()
@@ -32,6 +35,9 @@ async def test_download_image_raises_typed_exception_on_http_error(tmp_path):
 async def test_download_image_returns_path_on_success(tmp_path):
     adapter = _DummyAdapter()
     config = MagicMock()
+    config.proxy = None
+    config.api_base_url = "http://example.com"
+    config.auth_preset = "openai"
     config.api_key = "key"
     config.custom_headers = None
     mock_response = MagicMock()
@@ -47,6 +53,9 @@ async def test_download_image_returns_path_on_success(tmp_path):
 async def test_download_image_wraps_io_error(tmp_path):
     adapter = _DummyAdapter()
     config = MagicMock()
+    config.proxy = None
+    config.api_base_url = "http://example.com"
+    config.auth_preset = "openai"
     config.api_key = "key"
     config.custom_headers = None
     mock_response = MagicMock()

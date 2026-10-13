@@ -1,14 +1,14 @@
-from .base import BaseAdapter, GenerationResult
-
 import os
-import httpx
-import base64
 from datetime import datetime
 
-from src.adapters.errors import Category, Field, Diagnostic
-from src.models.task import GenerationTask
-from src.models.platform_config import PlatformConfig
+import httpx
+
+from src.adapters.errors import Category, Diagnostic, Field
 from src.config import constants
+from src.models.platform_config import PlatformConfig
+from src.models.task import GenerationTask
+
+from .base import BaseAdapter, GenerationResult
 
 
 class MidjourneyAdapter(BaseAdapter):
@@ -120,7 +120,6 @@ class MidjourneyAdapter(BaseAdapter):
             data = response.json()
 
             # Midjourney API 通常返回任务 ID，需要轮询或 webhook
-            task_id = data.get("id", str(task.id))
             image_url = data.get("image_url") or data.get("output", {}).get("url")
 
             if not image_url:
@@ -133,10 +132,7 @@ class MidjourneyAdapter(BaseAdapter):
             # 下载图片
             os.makedirs(constants.GENERATIONS_DIR, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = os.path.join(
-                constants.GENERATIONS_DIR,
-                f"{task.id}_{timestamp}.png"
-            )
+            save_path = os.path.join(constants.GENERATIONS_DIR, f"{task.id}_{timestamp}.png")
             await self.download_image(image_url, save_path, config)
             self._create_thumbnail(save_path)
 
@@ -148,9 +144,15 @@ class MidjourneyAdapter(BaseAdapter):
             return GenerationResult(
                 success=False,
                 error=original,
-                raw_response={"diagnostic": self._build_failure_diagnostic(
-                    category, url, payload, original, exc.response.status_code,
-                )},
+                raw_response={
+                    "diagnostic": self._build_failure_diagnostic(
+                        category,
+                        url,
+                        payload,
+                        original,
+                        exc.response.status_code,
+                    )
+                },
             )
         except Exception as exc:
             original = f"生成失败: {exc}"
@@ -158,9 +160,14 @@ class MidjourneyAdapter(BaseAdapter):
             return GenerationResult(
                 success=False,
                 error=original,
-                raw_response={"diagnostic": self._build_failure_diagnostic(
-                    category, url, payload, original,
-                )},
+                raw_response={
+                    "diagnostic": self._build_failure_diagnostic(
+                        category,
+                        url,
+                        payload,
+                        original,
+                    )
+                },
             )
 
     def _build_failure_diagnostic(

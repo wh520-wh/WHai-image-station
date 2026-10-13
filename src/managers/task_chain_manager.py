@@ -59,6 +59,11 @@ class TaskChainManager:
         if not chain:
             return False
         if chain_id in self._background_threads and self._background_threads[chain_id].is_alive():
+            executor = self._executors.get(chain_id)
+            if executor and chain.status == "paused":
+                executor.resume()
+                chain.status = "running"
+                self._notify_status(chain)
             return True
 
         executor = ChainExecutor(chain, self.queue_manager, self._on_task_status_changed)
@@ -84,7 +89,11 @@ class TaskChainManager:
         chain.status = "running"
         self._notify_status(chain)
         await executor.execute()
-        chain.status = "failed" if any(task.status == "failed" for task in chain.tasks) else "completed"
+        chain.status = (
+            "idle"
+            if executor._stopped
+            else ("failed" if any(task.status == "failed" for task in chain.tasks) else "completed")
+        )
         await self._save_chain(chain)
         self._notify_status(chain)
 
@@ -92,11 +101,13 @@ class TaskChainManager:
         if chain_id in self._executors:
             self._executors[chain_id].pause()
             self._chains[chain_id].status = "paused"
+            self._notify_status(self._chains[chain_id])
 
     async def stop_chain(self, chain_id: str) -> None:
         if chain_id in self._executors:
             self._executors[chain_id].stop()
             self._chains[chain_id].status = "idle"
+            self._notify_status(self._chains[chain_id])
 
     def get_chain_status(self, chain_id: str) -> TaskChain | None:
         return self._chains.get(chain_id)
@@ -119,13 +130,23 @@ class TaskChainManager:
                 run_async(self._delete_chain(chain_id))
             except Exception:
                 return False
+        self._discard_chain(chain_id)
+        return True
+
+    async def delete_chain_async(self, chain_id: str) -> bool:
+        if chain_id not in self._chains:
+            return False
+        await self._delete_chain(chain_id)
+        self._discard_chain(chain_id)
+        return True
+
+    def _discard_chain(self, chain_id):
         executor = self._executors.get(chain_id)
         if executor and hasattr(executor, "stop"):
             executor.stop()
         self._chains.pop(chain_id, None)
         self._executors.pop(chain_id, None)
         self._background_threads.pop(chain_id, None)
-        return True
 
     def _chain_from_data(self, chain_data: dict, chain_id: str) -> TaskChain:
         existing = self._chains.get(chain_id)
@@ -136,17 +157,19 @@ class TaskChainManager:
                 params["steps"] = task_data["steps"]
             if "guidance" in task_data and "guidance" not in params:
                 params["guidance"] = task_data["guidance"]
-            tasks.append(ChainTask(
-                task_id=task_data.get("task_id") or str(uuid.uuid4()),
-                chain_order=int(task_data.get("chain_order", i)),
-                source_id=task_data.get("source_id", ""),
-                model_config_id=task_data.get("model_config_id", ""),
-                prompt=task_data.get("prompt", ""),
-                negative_prompt=task_data.get("negative_prompt", ""),
-                params=params,
-                status=task_data.get("status", "pending"),
-                trigger_on=task_data.get("trigger_on", "success"),
-            ))
+            tasks.append(
+                ChainTask(
+                    task_id=task_data.get("task_id") or str(uuid.uuid4()),
+                    chain_order=int(task_data.get("chain_order", i)),
+                    source_id=task_data.get("source_id", ""),
+                    model_config_id=task_data.get("model_config_id", ""),
+                    prompt=task_data.get("prompt", ""),
+                    negative_prompt=task_data.get("negative_prompt", ""),
+                    params=params,
+                    status=task_data.get("status", "pending"),
+                    trigger_on=task_data.get("trigger_on", "success"),
+                )
+            )
         created_at = existing.created_at if existing else self._parse_created_at(chain_data.get("created_at"))
         return TaskChain(
             id=chain_id,
@@ -186,8 +209,21 @@ class TaskChainManager:
     async def _save_chain(self, chain: TaskChain):
         if not self.db:
             return
+        from src.config.database import Database
+
+        if isinstance(self.db, Database) and threading.current_thread() is not threading.main_thread():
+            worker_db = Database(self.db.db_path)
+            await worker_db.connect()
+            try:
+                await self._write_chain(worker_db, chain)
+            finally:
+                await worker_db.close()
+        else:
+            await self._write_chain(self.db, chain)
+
+    async def _write_chain(self, db, chain):
         data = chain.to_dict()
-        await self.db.execute(
+        await db.execute(
             """
             INSERT OR REPLACE INTO task_chains
             (id, name, created_at, status, failure_mode, tasks_json)
@@ -229,3 +265,9 @@ class TaskChainManager:
                 "tasks": tasks,
             }
             self._chains[row[0]] = self._chain_from_data(chain_data, row[0])
+            if self._chains[row[0]].status in ("running", "paused"):
+                self._chains[row[0]].status = "idle"
+                for task in self._chains[row[0]].tasks:
+                    if task.status == "generating":
+                        task.status = "pending"
+                await self._save_chain(self._chains[row[0]])

@@ -22,7 +22,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 # 4. 启动应用
-python src/main.py
+python -m src.main
 ```
 
 ## 运行测试
@@ -47,9 +47,11 @@ pyright src/                    # 静态类型检查（basic 模式）
 ```
 src/
   config/         # 配置（数据库、加密、常量、工具）
-  adapters/       # 平台适配器（OpenAI / Stability / Midjourney）
+  adapters/       # 图像适配器（OpenAI / Gemini / FLUX / MiniMax / 自定义）
   managers/       # 业务逻辑层（队列、历史、提示词、批量）
-  widgets/        # UI 组件（PySide6）
+  ui/             # Qt Quick 页面和共用组件
+  desktop.py      # QML 属性、信号、槽与 Python 服务桥接
+  widgets/        # 旧 Widgets 对照界面
   models/         # 数据模型
 tests/
   conftest.py     # 共享 fixture
@@ -64,15 +66,21 @@ docs/
 
 ## 数据流
 
-UI 事件 → Widget → Manager → Database / Adapter → API / SQLite
+QML 事件 → StudioBridge → Manager → Database / Adapter → API / SQLite
+
+QML 页面通过 Loader 切换，持久化和草稿状态保留在 StudioBridge。作品库使用增量 QAbstractListModel 和 GridView 复用委托；不要把全尺寸图片或全量控件常驻内存。异步 UI 操作使用 schedule_async，耗时文件处理使用 asyncio.to_thread，生图请求交由 QueueManager 的工作线程。
 
 ## 添加新平台适配器
 
 1. 在 `src/adapters/` 创建 `xxx_adapter.py`
 2. 继承 `BaseAdapter`，实现 `get_params_schema`、`validate_config`、`generate`
 3. 在 `src/adapters/__init__.py` 的 `init_adapters()` 注册
-4. 在 `src/config/constants.py` 的 `PLATFORM_DEFAULTS` 添加默认配置
+4. 在 `src/config/providers.py` 添加来源预置和模型能力，并先核对服务商官方文档
 5. 写测试：`tests/test_xxx_adapter.py`
+
+新增 QML 模块时同步更新 tools/pyinstaller_hooks/hook-PySide6.QtQml.py 的模块列表，并对打包程序进行离线启动检查。该列表当前包含 QtQml、QtQuick、Controls Basic、Templates、Layouts、Window 与 Shapes。
+
+Windows 打包使用 build.py：它优先选择解释器与系统 DLL，spec 排除外部工具提供的 ICU。Qt 需要 Windows 自带的 ICU ABI；Conda、Poppler 等工具的同名 ICU DLL 不能代替它。可用 `--smoke-test=<隔离目录>` 检查打包应用，自动初始化无密钥测试数据、切换六个页面、关闭并写入 report.json。测试不会请求生图服务。
 
 ## 提交规范
 

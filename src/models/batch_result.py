@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 class BatchResult:
     def __init__(self, success_count: int, failed_count: int, errors: list[str]):
         self.success_count = success_count

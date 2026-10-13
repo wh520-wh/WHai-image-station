@@ -1,6 +1,4 @@
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -18,7 +16,7 @@ class PlatformConfig:
     auth_preset: str = "openai"
     interface_type: str = "openai_images"
     response_format: str = "openai"
-    proxy: Optional[str] = None
+    proxy: str | None = None
     is_active: bool = True
 
     def to_dict(self) -> dict:
