@@ -7,6 +7,7 @@ import uuid
 from collections import deque
 from datetime import datetime
 
+from src.managers.reference_manager import retain_settings
 from src.managers.task_chain_executor import ChainExecutor
 from src.models.task_chain import ChainTask, TaskChain
 
@@ -23,6 +24,7 @@ class TaskChainManager:
         self._status_events = deque()
         self._status_events_lock = threading.Lock()
         self._status_callback = None
+        self._event_callback = None
 
     @classmethod
     def get_instance(cls, db=None, queue_manager=None):
@@ -33,6 +35,19 @@ class TaskChainManager:
     def set_status_callback(self, callback):
         self._status_callback = callback
 
+    def set_event_callback(self, callback):
+        self._event_callback = callback
+
+    async def shutdown(self):
+        for executor in self._executors.values():
+            executor.stop()
+        for thread in list(self._background_threads.values()):
+            if thread.is_alive():
+                await asyncio.to_thread(thread.join, 2)
+                if thread.is_alive():
+                    raise RuntimeError("生成流程仍在退出。")
+        self._event_callback = None
+
     def drain_status_events(self) -> list[TaskChain]:
         with self._status_events_lock:
             events = list(self._status_events)
@@ -40,10 +55,11 @@ class TaskChainManager:
         return events
 
     async def create_chain(self, chain_data: dict) -> str:
+        chain_data = dict(chain_data, tasks=[await retain_settings(task) for task in chain_data.get("tasks", [])])
         chain_id = chain_data.get("id") or str(uuid.uuid4())
         chain = self._chain_from_data(chain_data, chain_id)
-        self._chains[chain_id] = chain
         await self._save_chain(chain)
+        self._chains[chain_id] = chain
         return chain_id
 
     async def start_chain(self, chain_id: str) -> None:
@@ -91,7 +107,7 @@ class TaskChainManager:
         await executor.execute()
         chain.status = (
             "idle"
-            if executor._stopped
+            if executor.stopped
             else ("failed" if any(task.status == "failed" for task in chain.tasks) else "completed")
         )
         await self._save_chain(chain)
@@ -199,13 +215,15 @@ class TaskChainManager:
                 break
 
     def _notify_status(self, chain: TaskChain):
-        if not self._status_callback:
+        if not self._status_callback and not self._event_callback:
             return
-        if threading.current_thread() is threading.main_thread():
+        if threading.current_thread() is threading.main_thread() and self._status_callback:
             self._status_callback(chain)
             return
         with self._status_events_lock:
             self._status_events.append(chain)
+        if self._event_callback:
+            self._event_callback()
 
     async def _save_chain(self, chain: TaskChain):
         if not self.db:

@@ -54,7 +54,9 @@ $pythonExecutable = (python -c "import sys; print(sys.executable)").Trim()
 
 CI 使用 `QT_QPA_PLATFORM=offscreen` 和 `QT_QUICK_BACKEND=software`。测试通过后构建便携 EXE，再以 `--smoke-test=<临时目录>` 隐藏启动并等待退出；超过 30 秒、退出码非零、报告未就绪、图标未加载、六个页面不完整或出现 QML 警告都会失败。报告作为 `packaged-startup-report` 保存 7 天，便于排查打包问题。这些检查使用隔离数据，不调用真实生图 API，也不创建或发布 Release。
 
-目前依赖按 `pyproject.toml` 的版本范围安装，尚未锁定具体版本；CI 验证的是当次解析出的环境，不能替代依赖锁定。
+打包启动检查还会用隔离目录中的合成图片执行等比例缩小、WebP 编码并写入作品库，`tools_checked` 必须为真；这验证打包后的图片插件和后台处理链路，不调用服务商。
+
+Qt 依赖固定为已验证版本，其他依赖按 `pyproject.toml` 的版本范围安装；CI 验证的是当次解析出的环境，不能替代完整依赖锁定。
 
 ## 项目结构
 
@@ -80,11 +82,19 @@ docs/
 
 ## 数据流
 
+模块职责、初始化归属和工具扩展规则见 [架构说明](architecture.md)。
+
 QML 事件 → StudioBridge → Manager → Database / Adapter → API / SQLite
 
 QML 页面通过 Loader 切换，持久化和草稿状态保留在 StudioBridge。作品库使用增量 QAbstractListModel 和 GridView 复用委托；不要把全尺寸图片或全量控件常驻内存。异步 UI 操作使用 schedule_async，耗时文件处理使用 asyncio.to_thread，生图请求交由 QueueManager 的工作线程。
 
 ## 添加新平台适配器
+
+图片文件的通用行为集中在 `src/managers/image_assets.py`：参考图文件按内容保留副本，结果处理、缩略图与备份共用格式规则。设置中的引用字段与旧数据迁移由 `reference_manager.py` 管理，应用初始化只迁移一次。本地处理记录通过 `HistoryManager.save_local_edit()` 保存，Qt 桥接层不构造历史表字段。工具支持单图转换、最长边缩小和压缩；耗时工作通过 `asyncio.to_thread` 执行，界面使用独立的 `toolBusy` 状态。
+
+队列工作线程在 asyncio.Event 上等待，入队、并发额度变化和任务完成时唤醒。跨线程完成等待使用 Future；取消观察者不会取消实际任务。界面通过排队的 Qt 信号在主线程接收状态快照，流程不直接轮询任务对象。`schedule_async` 的短间隔推进仍仅在 UI 协程活动时运行。
+
+备份 v3 将参考图写入 `references/`，按内容去重，导入时恢复托管路径；v1/v2 仍可读。旧备份中的不可用外部路径保留以供用户重新选择，无法恢复不存在于归档里的图片。为保护共享引用，参考副本暂不自动回收。
 
 1. 在 `src/adapters/` 创建 `xxx_adapter.py`
 2. 继承 `BaseAdapter`，实现 `get_params_schema`、`validate_config`、`generate`

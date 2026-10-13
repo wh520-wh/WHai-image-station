@@ -45,8 +45,8 @@ jobs:
           }
           $report = Get-Content -LiteralPath (Join-Path $checkDirectory 'report.json') -Raw | ConvertFrom-Json
           $expectedPages = @('create', 'gallery', 'prompts', 'sources', 'tools', 'settings')
-          if (-not $report.ready -or -not $report.icon_loaded -or $report.warnings.Count -ne 0 -or ($report.pages -join ',') -ne ($expectedPages -join ',')) {
-            throw 'Packaged startup report failed readiness, icon, navigation or QML warning checks.'
+          if (-not $report.ready -or -not $report.icon_loaded -or -not $report.tools_checked -or $report.warnings.Count -ne 0 -or ($report.pages -join ',') -ne ($expectedPages -join ',')) {
+            throw 'Packaged startup report failed readiness, icon, navigation, local tool or QML warning checks.'
           }
           $report | ConvertTo-Json -Depth 3
       - name: Save packaged startup report

@@ -12,6 +12,7 @@ from src.config import constants, database
 from src.config.encryption import decrypt
 from src.config.providers import adapter_id
 from src.config.utils import get_thumbnail_path, parse_headers
+from src.managers.image_assets import retain_reference
 from src.models.platform_config import PlatformConfig
 from src.models.task import GenerationTask
 
@@ -21,14 +22,15 @@ class QueueManager:
 
     def __init__(self):
         self.tasks: deque[GenerationTask] = deque()
-        self.max_concurrent = constants.DEFAULT_CONCURRENT
+        self._max_concurrent = constants.DEFAULT_CONCURRENT
         self._running = False
         self._worker_thread: threading.Thread | None = None
-        self._wake_event = threading.Event()
+        self._wake_event: asyncio.Event | None = None
         self._tasks_lock = threading.Lock()
         self._events_lock = threading.Lock()
         self._status_events: deque[tuple[GenerationTask, str]] = deque(maxlen=500)
         self._status_callback: Callable | None = None
+        self._event_callback: Callable | None = None
         self._db: database.Database | None = None
         self._worker_db: database.Database | None = None
         self._generating_count = 0
@@ -37,6 +39,28 @@ class QueueManager:
         self._finished_tasks: deque[GenerationTask] = deque(maxlen=50)
         self._worker_loop = None
         self._active_jobs: set[asyncio.Task] = set()
+
+    @property
+    def max_concurrent(self):
+        return self._max_concurrent
+
+    @max_concurrent.setter
+    def max_concurrent(self, value):
+        self._max_concurrent = max(1, int(value))
+        self._wake_worker()
+
+    def _wake_worker(self):
+        if self._worker_loop and self._wake_event:
+            try:
+                self._worker_loop.call_soon_threadsafe(self._wake_event.set)
+            except RuntimeError:
+                pass  # The worker can finish while a GUI event is being delivered.
+
+    def set_event_callback(self, callback: Callable | None):
+        self._event_callback = callback
+
+    async def wait_for_task(self, task: GenerationTask) -> str:
+        return await asyncio.shield(asyncio.wrap_future(task._completion))
 
     @classmethod
     def get_instance(cls) -> "QueueManager":
@@ -55,7 +79,7 @@ class QueueManager:
         with self._tasks_lock:
             self.tasks.append(task)
         self._notify(task, "added")
-        self._wake_event.set()
+        self._wake_worker()
         return str(task.id)
 
     async def start(self):
@@ -71,15 +95,24 @@ class QueueManager:
 
     async def stop(self):
         self._running = False
-        self._wake_event.set()
+        self._wake_worker()
+        with self._tasks_lock:
+            waiting = list(self.tasks)
+            self.tasks.clear()
+        for task in waiting:
+            task.status = "CANCELLED"
+            task.completed_at = datetime.now()
+            self._notify(task, "cancelled")
         if self._worker_loop and self._worker_loop.is_running():
             self._worker_loop.call_soon_threadsafe(self._cancel_active_jobs)
         if self._worker_thread and self._worker_thread.is_alive():
             await asyncio.to_thread(self._worker_thread.join, 5)
+            if self._worker_thread.is_alive():
+                raise RuntimeError("任务线程仍在退出，请稍后再关闭。")
         self._worker_thread = None
 
     def _cancel_active_jobs(self):
-        for job in self._active_jobs:
+        for job in list(self._active_jobs):
             job.cancel()
 
     def drain_status_events(self) -> list[tuple[GenerationTask, str]]:
@@ -93,6 +126,7 @@ class QueueManager:
 
     async def _async_thread_main(self):
         self._worker_loop = asyncio.get_running_loop()
+        self._wake_event = asyncio.Event()
         # Create a dedicated DB connection for this worker thread's event loop.
         # Only needed when the main DB is a real Database (not a mock) — use
         # the same path so the worker reads/writes the same data file.
@@ -101,21 +135,19 @@ class QueueManager:
             await self._worker_db.connect()
 
         try:
-            in_flight: set[asyncio.Task] = set()
             while self._running:
-                in_flight = {job for job in in_flight if not job.done()}
-                self._active_jobs = in_flight
-                if len(in_flight) >= max(1, self.max_concurrent):
-                    await asyncio.sleep(0.05)
-                    continue
-                task = self._pop_next_task()
-                if task is None:
-                    await asyncio.sleep(0.05)
-                    continue
-                t = asyncio.create_task(self._process_task_with_semaphore(task, asyncio.Semaphore(1)))
-                in_flight.add(t)
-            if in_flight:
-                await asyncio.gather(*in_flight, return_exceptions=True)
+                self._wake_event.clear()
+                self._active_jobs = {job for job in self._active_jobs if not job.done()}
+                while len(self._active_jobs) < self.max_concurrent:
+                    task = self._pop_next_task()
+                    if task is None:
+                        break
+                    job = asyncio.create_task(self._process_tracked_task(task))
+                    self._active_jobs.add(job)
+                    job.add_done_callback(lambda _: self._wake_event and self._wake_event.set())
+                await self._wake_event.wait()
+            if self._active_jobs:
+                await asyncio.gather(*self._active_jobs, return_exceptions=True)
         finally:
             from src.adapters import get_all_adapters
 
@@ -125,6 +157,7 @@ class QueueManager:
                 await self._worker_db.close()
                 self._worker_db = None
             self._worker_loop = None
+            self._wake_event = None
             self._active_jobs.clear()
 
     def _pop_next_task(self) -> GenerationTask | None:
@@ -144,6 +177,8 @@ class QueueManager:
                 return
 
             task.platform_id = adapter_id(config.interface_type)
+            if task.reference_image_path:
+                task.reference_image_path = await asyncio.to_thread(retain_reference, task.reference_image_path)
             adapter = get_adapter(task.platform_id)
             if not adapter:
                 await self._fail_task(task, f"未找到平台适配器: {task.platform_id}")
@@ -176,19 +211,18 @@ class QueueManager:
         except Exception as exc:
             await self._fail_task(task, f"任务执行异常: {exc}")
 
-    async def _process_task_with_semaphore(self, task: GenerationTask, semaphore: asyncio.Semaphore):
-        async with semaphore:
+    async def _process_tracked_task(self, task: GenerationTask):
+        with self._generating_lock:
+            self._generating_count += 1
+            self._in_flight_tasks[str(task.id)] = task
+        try:
+            await self._process_task(task)
+        finally:
             with self._generating_lock:
-                self._generating_count += 1
-                self._in_flight_tasks[str(task.id)] = task
-            try:
-                await self._process_task(task)
-            finally:
-                with self._generating_lock:
-                    if task.status in ("COMPLETED", "FAILED"):
-                        self._finished_tasks.appendleft(task)
-                    self._generating_count -= 1
-                    self._in_flight_tasks.pop(str(task.id), None)
+                if task.status in ("COMPLETED", "FAILED"):
+                    self._finished_tasks.appendleft(task)
+                self._generating_count -= 1
+                self._in_flight_tasks.pop(str(task.id), None)
 
     async def _load_platform_config(self, task: GenerationTask) -> PlatformConfig | None:
         db = self._worker_db or self._db
@@ -298,6 +332,8 @@ class QueueManager:
             response_summary = None
         params = dict(task.params or {})
         params.pop("_diagnostic", None)
+        if task.reference_image_path:
+            params["reference_image_path"] = task.reference_image_path
         try:
             await db.save_generation_history(
                 {
@@ -326,12 +362,16 @@ class QueueManager:
             logging.getLogger(__name__).exception("Failed to save history for task %s", task.id)
 
     def _notify(self, task: GenerationTask, status: str):
-        if threading.current_thread() is threading.main_thread():
-            if self._status_callback:
-                self._status_callback(task, status)
+        if status in {"completed", "failed", "cancelled"} and not task._completion.done():
+            task._completion.set_result(task.status)
+        snapshot = GenerationTask.from_dict(task.to_dict())
+        if threading.current_thread() is threading.main_thread() and self._status_callback:
+            self._status_callback(snapshot, status)
             return
         with self._events_lock:
-            self._status_events.append((task, status))
+            self._status_events.append((snapshot, status))
+        if self._event_callback:
+            self._event_callback()
 
     def get_queue_info(self) -> dict:
         with self._tasks_lock:
@@ -365,14 +405,18 @@ class QueueManager:
         return [task.to_dict() for task in (in_flight_tasks + queued_tasks + finished_tasks)[:limit]]
 
     def cancel_task(self, task_id: str) -> bool:
+        cancelled = None
         with self._tasks_lock:
             for task in list(self.tasks):
                 if str(task.id) == task_id and task.status == "WAITING":
                     self.tasks.remove(task)
                     task.status = "CANCELLED"
                     task.completed_at = datetime.now()
-                    self._notify(task, "cancelled")
-                    return True
+                    cancelled = task
+                    break
+        if cancelled:
+            self._notify(cancelled, "cancelled")
+            return True
         return False
 
     def clear_completed(self):

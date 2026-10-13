@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import tempfile
@@ -19,6 +20,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from src.config import constants, encryption
 from src.config.utils import get_thumbnail_path, parse_headers
+from src.managers.image_assets import EXTENSIONS, create_thumbnail, read_image_data, store_reference
+from src.managers.reference_manager import get_reference_path, replace_reference_path
 
 
 @dataclass
@@ -111,9 +114,28 @@ class MigrationManager:
             os.close(handle)
             try:
                 with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as archive:
+                    reference_members = set()
+                    reference_paths = {}
+
+                    def portable_settings(raw):
+                        saved = dict(raw)
+                        reference = get_reference_path(saved)
+                        if reference:
+                            key = str(Path(reference).resolve())
+                            member = reference_paths.get(key)
+                            if member is None:
+                                data, image_format = read_image_data(reference)
+                                member = "references/" + hashlib.sha256(data).hexdigest() + EXTENSIONS[image_format]
+                                if member not in reference_members:
+                                    archive.writestr(member, data)
+                                    reference_members.add(member)
+                                reference_paths[key] = member
+                            saved = replace_reference_path(saved, member)
+                        return saved
+
                     saved_history = []
                     for raw in history:
-                        record = dict(raw)
+                        record = portable_settings(raw)
                         paths = list(
                             record.get("result_paths") or ([record["image_path"]] if record.get("image_path") else [])
                         )
@@ -143,11 +165,17 @@ class MigrationManager:
                             }
                     for name, value in (
                         ("history", saved_history),
-                        ("templates", templates),
+                        ("templates", [portable_settings(template) for template in templates]),
                         ("sources", sanitized_sources),
                         ("models", models),
                         ("settings", settings),
-                        ("chains", chains),
+                        (
+                            "chains",
+                            [
+                                [*chain[:5], json.dumps([portable_settings(task) for task in json.loads(chain[5] or "[]")])]
+                                for chain in chains
+                            ],
+                        ),
                     ):
                         archive.writestr(f"{name}.json", json.dumps(value, ensure_ascii=False))
                     if options.include_keys and options.key_password:
@@ -163,7 +191,7 @@ class MigrationManager:
                             token = _password_cipher(options.key_password, salt).encrypt(json.dumps(keys).encode())
                             archive.writestr("sources.keys", salt + token)
                     manifest = {
-                        "version": 2,
+                        "version": 3,
                         "contents": {
                             "history": len(history),
                             "templates": len(templates),
@@ -184,7 +212,7 @@ class MigrationManager:
         with zipfile.ZipFile(file_path) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             version = manifest.get("version", 1)
-            if str(version) not in {"1", "1.0", "2"}:
+            if str(version) not in {"1", "1.0", "2", "3"}:
                 raise ValueError("此备份版本不受支持")
             counts = manifest.get("contents", {})
             return BackupPreview(
@@ -197,14 +225,15 @@ class MigrationManager:
         with zipfile.ZipFile(file_path) as archive:
             if sum(info.file_size for info in archive.infolist()) > 2 * 1024**3:
                 raise ValueError("备份解压后超过 2 GB，请拆分导入")
+            archive_members = set(archive.namelist())
 
             async def read_json(name):
-                if name not in archive.namelist():
+                if name not in archive_members:
                     return []
                 return json.loads(await asyncio.to_thread(archive.read, name))
 
             keys = {}
-            if options.include_keys and "sources.keys" in archive.namelist():
+            if options.include_keys and "sources.keys" in archive_members:
                 if not options.key_password:
                     raise ValueError("请输入密钥备份密码")
                 encrypted = archive.read("sources.keys")
@@ -219,6 +248,23 @@ class MigrationManager:
                 except Exception as exc:
                     raise ValueError("备份密码不正确或密钥数据损坏") from exc
             created_files = []
+            restored_references = {}
+
+            async def restore_settings(raw):
+                saved = dict(raw)
+                reference = get_reference_path(saved)
+                if reference and str(reference).startswith("references/"):
+                    if ".." in Path(reference).parts or reference not in archive_members:
+                        raise ValueError("备份中的参考图丢失或路径不合法")
+                    if reference not in restored_references:
+                        data = await asyncio.to_thread(archive.read, reference)
+                        retained, created = await asyncio.to_thread(store_reference, data)
+                        restored_references[reference] = retained
+                        if created:
+                            created_files.append(Path(retained))
+                    saved = replace_reference_path(saved, restored_references[reference])
+                return saved
+
             try:
                 async with (
                     self.db.transaction() if self.db and hasattr(self.db, "transaction") else _null_transaction()
@@ -239,13 +285,14 @@ class MigrationManager:
                             if options.conflict_mode == "keep" and await self.db.get_source_model(model["id"]):
                                 continue
                             await self.db.save_source_model(model)
-                    if options.include_history and "history.json" in archive.namelist():
+                    if options.include_history and "history.json" in archive_members:
                         Path(constants.GENERATIONS_DIR).mkdir(parents=True, exist_ok=True)
                         for record in await read_json("history.json"):
                             if options.conflict_mode == "keep" and await self.history_manager.get_record(
                                 record["task_id"]
                             ):
                                 continue
+                            record = await restore_settings(record)
                             paths = []
                             for member in record.pop("archive_images", []):
                                 if not member.startswith("images/") or ".." in Path(member).parts:
@@ -259,20 +306,18 @@ class MigrationManager:
                                 record.update(
                                     image_path=paths[0], thumbnail_path=get_thumbnail_path(paths[0]), result_paths=paths
                                 )
-                                from src.adapters.openai_adapter import OpenAIAdapter
-
                                 for path in paths:
-                                    await asyncio.to_thread(OpenAIAdapter()._create_thumbnail, path)
                                     created_files.append(Path(get_thumbnail_path(path)))
+                                    await asyncio.to_thread(create_thumbnail, path)
                             record["result_paths_json"] = record.get("result_paths", [])
                             await self.history_manager.save_record(record)
                             result.imported_history += 1
-                    if options.include_templates and "templates.json" in archive.namelist():
+                    if options.include_templates and "templates.json" in archive_members:
                         existing = {(t["name"], t["prompt"]) for t in await self.prompt_manager.get_templates()}
                         for template in await read_json("templates.json"):
                             if options.conflict_mode == "keep" and (template["name"], template["prompt"]) in existing:
                                 continue
-                            await self.prompt_manager.save_template(template)
+                            await self.prompt_manager.save_template(await restore_settings(template))
                             result.imported_templates += 1
                     if options.include_settings:
                         for key, value in await read_json("settings.json"):
@@ -280,7 +325,12 @@ class MigrationManager:
                                 await self.db.set_pref(key, value)
                     if options.include_chains and self.db:
                         for chain in await read_json("chains.json"):
+                            if options.conflict_mode == "keep" and await self.db.fetchone(
+                                "SELECT id FROM task_chains WHERE id = ?", (chain[0],)
+                            ):
+                                continue
                             task_data = json.loads(chain[5])
+                            task_data = [await restore_settings(task) for task in task_data]
                             for task in task_data:
                                 task["status"] = "pending"
                             mode = "IGNORE" if options.conflict_mode == "keep" else "REPLACE"
@@ -295,7 +345,7 @@ class MigrationManager:
                                     json.dumps(task_data, ensure_ascii=False),
                                 ),
                             )
-                    if options.include_keys and "keys.ikey" in archive.namelist() and options.key_password:
+                    if options.include_keys and "keys.ikey" in archive_members and options.key_password:
                         if self.key_vault is None:
                             raise ValueError("此旧版备份需要原密钥库；请用原应用重新导出")
                         keys_path = file_path + ".keys.tmp"

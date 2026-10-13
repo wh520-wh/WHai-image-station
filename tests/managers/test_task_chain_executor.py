@@ -10,8 +10,12 @@ class CompletingQueueManager:
             await asyncio.sleep(0)
             task.status = "COMPLETED"
 
-        asyncio.create_task(complete_task())
+        self.completion = asyncio.create_task(complete_task())
         return str(task.id)
+
+    async def wait_for_task(self, task):
+        await self.completion
+        return task.status
 
 
 class FailingQueueManager:
@@ -20,8 +24,12 @@ class FailingQueueManager:
             await asyncio.sleep(0)
             task.status = "FAILED"
 
-        asyncio.create_task(fail_task())
+        self.completion = asyncio.create_task(fail_task())
         return str(task.id)
+
+    async def wait_for_task(self, task):
+        await self.completion
+        return task.status
 
 
 def test_execute_treats_uppercase_queue_statuses_as_success():

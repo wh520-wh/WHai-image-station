@@ -1,6 +1,6 @@
 from collections import deque
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -31,6 +31,8 @@ from src.widgets.theme import COLORS, SPACING, app_font, button_style, label_sty
 
 
 class MainWindow(QWidget):
+    eventsAvailable = Signal()
+
     def __init__(self, db):
         super().__init__()
         self.db = db
@@ -62,7 +64,9 @@ class MainWindow(QWidget):
         self.loading_overlay.setVisible(True)
         self.loading_overlay.setGeometry(self.rect())
         QTimer.singleShot(50, self._load_data)
-        self._start_queue_polling()
+        self.eventsAvailable.connect(self._drain_queue_events, Qt.ConnectionType.QueuedConnection)
+        self.queue_manager.set_event_callback(self.eventsAvailable.emit)
+        self.task_chain_manager.set_event_callback(self.eventsAvailable.emit)
 
     def _setup_ui(self):
         self.setWindowTitle("WHai Image Station - 图片生成工具")
@@ -165,12 +169,6 @@ class MainWindow(QWidget):
         else:
             self.prompt_panel.setMaximumWidth(260)
             self.prompt_panel.setMinimumWidth(180)
-
-    def _start_queue_polling(self):
-        self.queue_timer = QTimer(self)
-        self.queue_timer.setInterval(250)
-        self.queue_timer.timeout.connect(self._drain_queue_events)
-        self.queue_timer.start()
 
     def _drain_queue_events(self):
         events = self.queue_manager.drain_status_events()

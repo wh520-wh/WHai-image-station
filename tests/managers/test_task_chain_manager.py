@@ -102,6 +102,26 @@ def test_create_chain_updates_existing_id_instead_of_duplicating():
     assert chains[0]["name"] == "updated"
 
 
+def test_failed_chain_save_preserves_existing_in_memory_configuration():
+    class FailingDb:
+        async def execute(self, *args):
+            raise RuntimeError("database unavailable")
+
+    async def scenario():
+        manager = make_manager()
+        await manager.create_chain({"id": "existing", "name": "saved", "tasks": []})
+        manager.db = FailingDb()
+        try:
+            await manager.create_chain({"id": "existing", "name": "unsaved", "tasks": []})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("save should fail")
+        assert manager.get_chain("existing")["name"] == "saved"
+
+    asyncio.run(scenario())
+
+
 def test_start_chain_background_returns_without_running_inline():
     manager = make_manager()
     chain_id = asyncio.run(manager.create_chain({"name": "background", "tasks": []}))

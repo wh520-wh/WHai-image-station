@@ -27,6 +27,7 @@ from src.config.providers import (
     model_capabilities,
 )
 from src.config.utils import parse_headers, safe_int
+from src.managers import image_assets
 from src.managers.batch_ops_manager import BatchOpsManager
 from src.managers.history_manager import HistoryManager
 from src.managers.migration_manager import ExportOptions, ImportOptions, MigrationManager
@@ -95,6 +96,7 @@ class StudioBridge(QObject):
     message = Signal(str, bool)
     navigate = Signal(str)
     viewerRequested = Signal(dict)
+    eventsAvailable = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,6 +110,8 @@ class StudioBridge(QObject):
         self._filter = ""
         self._gallery_revision = 0
         self._preview_revision = 0
+        self._tool_revision = 0
+        self._reference_revision = 0
         self._state = {
             "ready": False,
             "loadingText": "正在打开工作台…",
@@ -124,6 +128,11 @@ class StudioBridge(QObject):
             "previewElapsed": "",
             "prompts": [],
             "chains": [],
+            "toolInput": {},
+            "toolResult": {},
+            "toolBusy": False,
+            "toolLoading": False,
+            "toolError": "",
             "sourceId": "",
             "modelId": "",
             "caps": model_capabilities("openai_images", "gpt-image-2"),
@@ -155,8 +164,10 @@ class StudioBridge(QObject):
             "imagePath": constants.GENERATIONS_DIR,
         }
         self._timer = QTimer(self)
-        self._timer.setInterval(100)
-        self._timer.timeout.connect(self._drain_events)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._refresh_preview_elapsed)
+        self.eventsAvailable.connect(self._drain_events, Qt.ConnectionType.QueuedConnection)
+        self.queue.set_event_callback(self.eventsAvailable.emit)
 
     @Property(dict, notify=stateChanged)
     def state(self):
@@ -220,6 +231,7 @@ class StudioBridge(QObject):
                             await db.save_source_model(model)
         self.chains = TaskChainManager(db, self.queue)
         self.chains.set_status_callback(lambda _: self.refresh_chains())
+        self.chains.set_event_callback(self.eventsAvailable.emit)
         await self.chains.load_chains()
         await self.reload_sources()
         self.selectSource(await db.get_pref("last_source"))
@@ -236,7 +248,7 @@ class StudioBridge(QObject):
             reducedMotion=system_reduced_motion() if motion == "system" else motion == "true",
             concurrent=concurrent,
         )
-        self._timer.start()
+        self._drain_events()
 
     async def reload_sources(self):
         assert self.db
@@ -298,6 +310,8 @@ class StudioBridge(QObject):
 
     @Slot(str, "QVariant")
     def setDraft(self, key, value):
+        if key == "reference":
+            self._reference_revision += 1
         if key in self._state["draft"]:
             draft = dict(self._state["draft"])
             draft[key] = value
@@ -378,6 +392,9 @@ class StudioBridge(QObject):
             (model["display_name"] for model in self._models if model["id"] == record.get("model_config_id")),
             record.get("platform_id") or "",
         )
+        record["isLocalEdit"] = HistoryManager.is_local_edit(record)
+        if record["isLocalEdit"]:
+            record["modelText"] = "本地图片工具"
         record["sourceText"] = next(
             (source["name"] for source in self._sources if source["id"] == record.get("source_id")), ""
         )
@@ -391,6 +408,10 @@ class StudioBridge(QObject):
         record = self._present_record(record)
         index = min(self._state["previewImageIndex"], max(0, len(record["images"]) - 1))
         self.update(preview=record, previewImageIndex=index)
+        if record.get("status") in ("WAITING", "PENDING", "GENERATING"):
+            self._timer.start()
+        else:
+            self._timer.stop()
         self._refresh_preview_elapsed()
 
     def _refresh_preview_elapsed(self):
@@ -451,9 +472,18 @@ class StudioBridge(QObject):
         elif not Path(path).is_file():
             self.message.emit("图片文件不存在，请重新选择。", True)
         else:
-            self.setDraft("reference", path)
-            self.navigate.emit("create")
-            self.message.emit("已作为参考图，可修改提示词继续创作。", False)
+            self._reference_revision += 1
+            revision = self._reference_revision
+
+            async def retain():
+                retained = await asyncio.to_thread(image_assets.retain_reference, path)
+                if revision != self._reference_revision or not self._state["caps"]["reference"]:
+                    return
+                self.setDraft("reference", retained)
+                self.navigate.emit("create")
+                self.message.emit("已作为参考图，可修改提示词继续创作。", False)
+
+            self.launch(retain())
 
     def _drain_events(self):
         events = self.queue.drain_status_events()
@@ -473,14 +503,12 @@ class StudioBridge(QObject):
                     self.message.emit(task.error or "生成失败，请在作品详情查看诊断。", True)
         if self.chains and self.chains.drain_status_events():
             self.refresh_chains()
-        if self._state["preview"].get("status") in ("WAITING", "PENDING", "GENERATING"):
-            self._refresh_preview_elapsed()
 
     @Slot()
     def chooseReference(self):
         path, _ = QFileDialog.getOpenFileName(None, "选择参考图", "", "图片 (*.png *.jpg *.jpeg *.webp)")
         if path:
-            self.setDraft("reference", path)
+            self.useImageAsReference(path)
 
     @Slot(str)
     def addPreset(self, preset_id):
@@ -573,7 +601,7 @@ class StudioBridge(QObject):
             if not name.strip() or not draft["prompt"].strip():
                 raise ValueError("模板需要名称和提示词，请先在创作页填写画面。")
             task = self.task_from_draft(require_key=False)
-            await self.db.save_prompt_template(
+            await PromptManager(self.db).save_template(
                 {
                     "name": name.strip(),
                     "prompt": draft["prompt"],
@@ -672,7 +700,10 @@ class StudioBridge(QObject):
 
     @Slot("QVariantMap")
     def reuseRecord(self, record):
-        self.usePrompt(record)
+        if HistoryManager.is_local_edit(record):
+            self.editImage(record.get("image_path") or "")
+        else:
+            self.usePrompt(record)
 
     @Slot(str, str)
     def batchAction(self, action, value):
@@ -924,15 +955,76 @@ class StudioBridge(QObject):
 
         self.launch(decode(), copied)
 
+    @Slot()
+    def chooseToolImage(self):
+        path, _ = QFileDialog.getOpenFileName(None, "选择要处理的图片", "", "图片 (*.png *.jpg *.jpeg *.webp)")
+        if path:
+            self.loadToolImage(path)
+
+    @Slot(str)
+    def editImage(self, path):
+        self.loadToolImage(path)
+        self.navigate.emit("tools")
+
+    @Slot(str)
+    def loadToolImage(self, path):
+        if self._state["toolBusy"]:
+            return
+        url = QUrl(path)
+        path = url.toLocalFile() if url.isLocalFile() else path
+        self._tool_revision += 1
+        revision = self._tool_revision
+        self.update(toolLoading=True, toolError="", toolResult={})
+
+        async def read():
+            try:
+                info = await asyncio.to_thread(image_assets.inspect_image, path)
+                if revision == self._tool_revision:
+                    self.update(toolInput=dict(info, imageUrl=file_url(info["path"])))
+            except (ValueError, OSError) as error:
+                if revision == self._tool_revision:
+                    self.update(toolInput={}, toolError="图片无法打开：" + str(error))
+            finally:
+                if revision == self._tool_revision:
+                    self.update(toolLoading=False)
+
+        self.launch(read())
+
+    @Slot(str, str, int, int)
+    def runImageTool(self, operation, output_format, edge, quality):
+        if self._state["toolBusy"] or self._state["toolLoading"]:
+            return
+        source = self._state["toolInput"]
+        if not source:
+            self.message.emit("先选择一张图片。", True)
+            return
+        self.update(toolBusy=True, toolError="", toolResult={})
+
+        async def run():
+            try:
+                result = await asyncio.to_thread(
+                    image_assets.process_image, source["path"], operation, output_format, edge, quality
+                )
+                self.update(toolResult=dict(result, imageUrl=file_url(result["path"]), recordSaved=False))
+                assert self.db
+                await HistoryManager(self.db).save_local_edit(
+                    source, result,
+                    {"operation": operation, "output_format": output_format, "edge": edge, "quality": quality},
+                )
+                self.update(toolResult=dict(self._state["toolResult"], recordSaved=True))
+                await self.load_gallery()
+            except Exception as error:
+                self.update(toolError=str(error))
+            finally:
+                self.update(toolBusy=False)
+
+        self.launch(run())
+
     async def shutdown(self):
         self._timer.stop()
+        self.queue.set_event_callback(None)
         if self.db:
             await self.db.set_pref("last_source", self._state["sourceId"])
             await self.db.set_pref("last_model", self._state["modelId"])
         if self.chains:
-            for chain in self.chains.get_all_chains():
-                await self.chains.stop_chain(chain["id"])
-            threads = list(self.chains._background_threads.values())
-            for thread in threads:
-                if thread.is_alive():
-                    await asyncio.to_thread(thread.join, 2)
+            await self.chains.shutdown()

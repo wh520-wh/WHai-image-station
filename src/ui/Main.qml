@@ -75,6 +75,8 @@ ApplicationWindow {
         target: studio
         function onNavigate(page) {
             appWindow.currentPage = page;
+            if (page === "tools")
+                Qt.callLater(() => { if (appWindow.activePageLoader && appWindow.activePageLoader.item) appWindow.activePageLoader.item.toolTab = 0; });
         }
         function onMessage(text, error) {
             toast.text = text;
@@ -599,7 +601,7 @@ ApplicationWindow {
                             text: viewer.record.dateText || ""
                         }
                         Caption {
-                            text: "生成参数"
+                            text: viewer.record.isLocalEdit ? "处理参数" : "生成参数"
                             font.weight: Font.DemiBold
                         }
                         TextArea {
@@ -640,6 +642,7 @@ ApplicationWindow {
                 }
                 MButton {
                     text: "复用提示词与参数"
+                    visible: !viewer.record.isLocalEdit
                     Layout.fillWidth: true
                     primary: true
                     onClicked: {
@@ -648,9 +651,19 @@ ApplicationWindow {
                     }
                 }
                 MButton {
-                    text: "复制提示词"
+                    text: viewer.record.isLocalEdit ? "复制说明" : "复制提示词"
                     Layout.fillWidth: true
                     onClicked: studio.copyText(viewer.record.prompt || "")
+                }
+                MButton {
+                    text: "在图片工具中处理"
+                    iconName: "resize"
+                    Layout.fillWidth: true
+                    visible: !!viewer.currentPath
+                    onClicked: {
+                        studio.editImage(viewer.currentPath);
+                        viewer.close();
+                    }
                 }
                 RowLayout {
                     Layout.fillWidth: true

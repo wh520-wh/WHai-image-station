@@ -22,6 +22,9 @@ Item {
             close: '<path d="m6 6 12 12M18 6 6 18"/>',
             chevron: '<path d="m7 10 5 5 5-5"/>',
             image: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="m4 17 6-6 5 5 3-3 3 3"/>',
+            convert: '<path d="M4 8h15m-4-4 4 4-4 4M20 16H5m4-4-4 4 4 4"/>',
+            resize: '<path d="M9 3H3v6M15 21h6v-6M3 3l7 7m11 11-7-7"/><rect x="8" y="8" width="8" height="8" rx="2"/>',
+            compress: '<path d="M3 7h6V3M21 17h-6v4M3 3l6 6m12 12-6-6"/><path d="M15 3h6v6M9 21H3v-6"/>',
             bolt: '<path d="m13 2-9 12h7l-1 8 10-13h-7z"/>'
         })
     Image {

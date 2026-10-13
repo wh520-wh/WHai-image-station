@@ -1,18 +1,28 @@
+from __future__ import annotations
+
 import os
-from typing import Optional
+from datetime import datetime
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from src.config import constants, database
 from src.config.utils import get_thumbnail_path
 
+if TYPE_CHECKING:
+    from src.managers.image_assets import ImageInfo
+
+LOCAL_EDIT_PLATFORM = "local_image"
+LOCAL_EDIT_LABELS = {"convert": "格式转换", "resize": "尺寸调整", "compress": "图片压缩"}
+
 
 class HistoryManager:
-    _instance: Optional["HistoryManager"] = None
+    _instance: HistoryManager | None = None
 
     def __init__(self, db: database.Database | None = None):
         self._db = db
 
     @classmethod
-    def get_instance(cls) -> "HistoryManager":
+    def get_instance(cls) -> HistoryManager:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -33,6 +43,28 @@ class HistoryManager:
     async def save_record(self, record: dict):
         if self._db:
             await self._db.save_generation_history(record)
+
+    @staticmethod
+    def is_local_edit(record: dict) -> bool:
+        return record.get("platform_id") in {LOCAL_EDIT_PLATFORM, "本地图片工具"}
+
+    async def save_local_edit(self, source: ImageInfo, result: ImageInfo, options: dict):
+        if not self._db:
+            raise RuntimeError("作品库尚未初始化。")
+        now = datetime.now().isoformat()
+        await self.save_record(
+            {
+                "task_id": uuid4().hex,
+                "platform_id": LOCAL_EDIT_PLATFORM,
+                "prompt": LOCAL_EDIT_LABELS[options["operation"]] + " · " + source["name"],
+                "params": dict(options),
+                "image_path": result["path"],
+                "thumbnail_path": get_thumbnail_path(result["path"]),
+                "result_paths_json": [result["path"]],
+                "status": "COMPLETED", "created_at": now, "completed_at": now,
+                "category": "本地处理",
+            }
+        )
 
     async def update_status(self, task_id: str, status: str, **kwargs):
         if self._db:

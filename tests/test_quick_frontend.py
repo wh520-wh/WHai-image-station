@@ -17,6 +17,133 @@ from src.desktop import StudioBridge
 from src.models.task import GenerationTask
 
 
+def test_local_image_tools_use_real_qml_controls_and_keep_original(quick_studio, qtbot, tmp_path):
+    import os
+
+    from PIL import Image, ImageDraw
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtTest import QTest
+
+    bridge, root, _, warnings = quick_studio
+    original = tmp_path / "forest.png"
+    image = Image.new("RGB", (720, 480), "#dce8dc")
+    drawing = ImageDraw.Draw(image)
+    drawing.ellipse((430, 60, 550, 180), fill="#ebc893")
+    drawing.polygon([(0, 380), (200, 170), (380, 380), (520, 230), (720, 360), (720, 480), (0, 480)], fill="#729e85")
+    drawing.polygon([(0, 430), (260, 320), (420, 460), (630, 330), (720, 390), (720, 480), (0, 480)], fill="#285d45")
+    image.save(original)
+    original_data = original.read_bytes()
+    root.setProperty("currentPage", "tools")
+    bridge.loadToolImage(QUrl.fromLocalFile(str(original)).toString())
+    qtbot.waitUntil(lambda: bool(bridge.state["toolInput"]) and not bridge.state["toolLoading"])
+    qtbot.wait(100)
+    page = root.property("activePageLoader").property("item")
+
+    def control(name):
+        pending = [page]
+        while pending:
+            item = pending.pop()
+            if item.objectName() == name:
+                return item
+            pending.extend(item.childItems())
+        return None
+
+    def click(name):
+        button = control(name)
+        assert button and button.property("enabled")
+        point = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
+        QTest.mouseClick(root, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+
+    click("tool_resize")
+    edge = control("toolEdge")
+    edge.setProperty("text", "360")
+    click("runImageTool")
+    qtbot.waitUntil(lambda: bool(bridge.state["toolResult"]) and not bridge.state["toolBusy"])
+    result = bridge.state["toolResult"]
+    assert (result["width"], result["height"]) == (360, 240)
+    assert result["recordSaved"]
+    assert bridge.state["galleryTotal"] == 1
+    assert original.read_bytes() == original_data
+    assert bridge.gallery.records[0]["image_path"] == result["path"]
+    artifacts = os.environ.get("WHAI_UI_ARTIFACTS")
+    if artifacts:
+        output = Path(artifacts)
+        output.mkdir(parents=True, exist_ok=True)
+        qtbot.wait(200)
+        root.grabWindow().save(str(output / "tools-result.png"))
+        bridge.update(dark=True)
+        qtbot.wait(150)
+        root.grabWindow().save(str(output / "tools-dark.png"))
+        bridge.update(dark=False)
+        root.setWidth(1000)
+        root.setHeight(680)
+        qtbot.wait(150)
+        root.grabWindow().save(str(output / "tools-compact.png"))
+    click("workflowTab")
+    assert page.property("toolTab") == 1
+    click("imageToolsTab")
+    assert page.property("toolTab") == 0
+    assert not warnings
+
+
+def test_local_tool_history_failure_keeps_processed_file_available(quick_studio, qtbot, tmp_path, monkeypatch):
+    from PIL import Image
+
+    bridge, _, _, warnings = quick_studio
+    original = tmp_path / "local.png"
+    Image.new("RGB", (32, 24), "green").save(original)
+    bridge.loadToolImage(str(original))
+    qtbot.waitUntil(lambda: bool(bridge.state["toolInput"]) and not bridge.state["toolLoading"])
+
+    async def fail_save(record):
+        raise RuntimeError("offline database unavailable")
+
+    monkeypatch.setattr(bridge.db, "save_generation_history", fail_save)
+    bridge.runImageTool("convert", "JPEG", 1024, 85)
+    qtbot.waitUntil(lambda: bool(bridge.state["toolResult"]) and not bridge.state["toolBusy"])
+    assert Path(bridge.state["toolResult"]["path"]).is_file()
+    assert not bridge.state["toolResult"]["recordSaved"]
+    assert "database unavailable" in bridge.state["toolError"]
+    assert original.is_file()
+    assert not warnings
+
+
+def test_tool_preview_respects_photo_orientation(quick_studio, qtbot, tmp_path):
+    from PIL import Image
+
+    bridge, root, _, warnings = quick_studio
+    original = tmp_path / "portrait.jpg"
+    photo = Image.new("RGB", (256, 128), "green")
+    exif = photo.getexif()
+    exif[274] = 6
+    photo.save(original, exif=exif)
+    bridge.editImage(str(original))
+    qtbot.waitUntil(lambda: bool(bridge.state["toolInput"]) and not bridge.state["toolLoading"])
+    page = root.property("activePageLoader").property("item")
+    preview = page.findChild(QQuickItem, "toolImagePreview")
+    qtbot.waitUntil(lambda: preview.property("paintedHeight") > preview.property("paintedWidth") > 0)
+    assert not warnings
+
+
+def test_reusing_local_edit_opens_tools_without_changing_generation_draft(quick_studio, qtbot, tmp_path):
+    from PIL import Image
+
+    from src.managers.history_manager import LOCAL_EDIT_PLATFORM
+
+    bridge, root, _, warnings = quick_studio
+    original = tmp_path / "edited.png"
+    Image.new("RGB", (64, 32), "green").save(original)
+    draft = dict(bridge.state["draft"])
+    record = bridge._present_record({"platform_id": LOCAL_EDIT_PLATFORM, "image_path": str(original), "params": {"quality": 85}})
+    assert record["isLocalEdit"]
+    bridge.reuseRecord(record)
+    qtbot.waitUntil(lambda: bool(bridge.state["toolInput"]) and not bridge.state["toolLoading"])
+    assert root.property("currentPage") == "tools"
+    assert bridge.state["draft"] == draft
+    assert not bridge.state["tasks"]
+    assert not warnings
+
+
 def test_workflow_preserves_full_settings_until_explicit_replacement(quick_studio, qtbot, tmp_path):
     from PIL import Image
 
@@ -36,7 +163,8 @@ def test_workflow_preserves_full_settings_until_explicit_replacement(quick_studi
     chain_id = chain["id"]
     bridge.chains.get_chain_status(chain_id).failure_mode = "skip"
     original = chain["tasks"][0]
-    assert original["reference_image_path"] == str(reference)
+    assert Path(original["reference_image_path"]).read_bytes() == reference.read_bytes()
+    assert Path(original["reference_image_path"]).parent.name == "references"
     assert original["params"]["output_format"] == "webp"
     assert original["params"]["background"] == "transparent"
 
@@ -52,7 +180,7 @@ def test_workflow_preserves_full_settings_until_explicit_replacement(quick_studi
         for key in ("source_id", "model_config_id", "params", "negative_prompt", "reference_image_path"):
             assert task[key] == original[key]
     get_app_loop().run_until_complete(bridge.chains.load_chains())
-    assert bridge.chains.get_chain(chain_id)["tasks"][0]["reference_image_path"] == str(reference)
+    assert bridge.chains.get_chain(chain_id)["tasks"][0]["reference_image_path"] == original["reference_image_path"]
 
     bridge.saveChain(chain_id, "replaced", "new settings", True)
     qtbot.waitUntil(lambda: bridge.state["chains"][0]["name"] == "replaced")
@@ -81,7 +209,8 @@ def test_template_preserves_supported_parameters_and_reference(quick_studio, qtb
     bridge.setDraft("reference", "")
     bridge.setDraft("transparent", False)
     bridge.usePrompt(bridge.state["prompts"][0])
-    assert bridge.state["draft"]["reference"] == str(reference)
+    assert Path(bridge.state["draft"]["reference"]).read_bytes() == reference.read_bytes()
+    assert Path(bridge.state["draft"]["reference"]).parent.name == "references"
     assert bridge.state["draft"]["transparent"]
     assert bridge.state["draft"]["output_format"] == "webp"
 
@@ -230,6 +359,7 @@ def test_selected_task_and_image_survive_other_completions_and_gallery_filters(
     loop.run_until_complete(bridge.reload_sources())
     bridge.selectSource(source["id"])
     bridge.queue = QueueManager()
+    bridge.queue.set_event_callback(bridge.eventsAvailable.emit)
     bridge.queue.max_concurrent = 2
     loop.run_until_complete(bridge.queue.initialize(bridge.db))
     loop.run_until_complete(bridge.queue.start())
@@ -280,7 +410,9 @@ def test_selected_task_and_image_survive_other_completions_and_gallery_filters(
                     )
                 )
             else:
-                assert bridge.state["draft"]["reference"] == paths["A"][1]
+                qtbot.waitUntil(lambda: bool(bridge.state["draft"]["reference"]))
+                assert Path(bridge.state["draft"]["reference"]).read_bytes() == Path(paths["A"][1]).read_bytes()
+                assert Path(bridge.state["draft"]["reference"]).parent.name == "references"
 
         requested = []
         bridge.viewerRequested.connect(requested.append)
@@ -596,6 +728,7 @@ def test_mocked_generation_reaches_qml_gallery(quick_studio, qtbot, monkeypatch,
     loop.run_until_complete(bridge.reload_sources())
     bridge.selectSource(source["id"])
     bridge.queue = QueueManager()
+    bridge.queue.set_event_callback(bridge.eventsAvailable.emit)
     loop.run_until_complete(bridge.queue.initialize(bridge.db))
     loop.run_until_complete(bridge.queue.start())
     try:

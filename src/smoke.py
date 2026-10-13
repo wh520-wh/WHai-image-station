@@ -26,13 +26,20 @@ def run_smoke(directory):
     window = app._engine.rootObjects()[0]
     pages = ["create", "gallery", "prompts", "sources", "tools", "settings"]
     page_index = 0
+    tool_stage = 0
     timer = QTimer()
     timer.setInterval(120)
 
     def tick():
-        nonlocal page_index
+        nonlocal page_index, tool_stage
         assert app._bridge
-        if app._bridge._state["ready"]:
+        state = app._bridge.property("state")
+        if time.perf_counter() - started > 20:
+            timer.stop()
+            report["error"] = "Startup or local tool check timed out"
+            app.quit()
+            return
+        if state["ready"]:
             if not report["ready"]:
                 report["ready"] = True
                 report["ready_seconds"] = round(time.perf_counter() - started, 3)
@@ -41,15 +48,38 @@ def run_smoke(directory):
                 report["pages"].append(pages[page_index])
                 page_index += 1
                 return
+            if tool_stage == 0:
+                from PIL import Image
+
+                source = target / "offline-tool.png"
+                Image.new("RGBA", (160, 120), (40, 93, 69, 120)).save(source)
+                window.setProperty("currentPage", "tools")
+                app._bridge.loadToolImage(str(source))
+                tool_stage = 1
+                return
+            if state["toolLoading"] or state["toolBusy"]:
+                return
+            if tool_stage == 1:
+                if not state["toolInput"]:
+                    report["error"] = state["toolError"] or "Local image input failed"
+                else:
+                    app._bridge.runImageTool("resize", "WebP", 80, 85)
+                    tool_stage = 2
+                    return
+            else:
+                result = state["toolResult"]
+                report["tools_checked"] = (
+                    result.get("width") == 80
+                    and result.get("height") == 60
+                    and result.get("format") == "WEBP"
+                    and result.get("recordSaved") is True
+                    and not state["toolError"]
+                )
             timer.stop()
-            app.quit()
-        elif time.perf_counter() - started > 15:
-            timer.stop()
-            report["error"] = "Startup timed out"
             app.quit()
 
     timer.timeout.connect(tick)
     timer.start()
     app.exec()
     (target / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return 0 if report["ready"] and report["icon_loaded"] and not report["warnings"] else 1
+    return 0 if report["ready"] and report["icon_loaded"] and report.get("tools_checked") and not report["warnings"] else 1

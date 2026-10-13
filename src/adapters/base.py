@@ -13,6 +13,7 @@ from PIL import Image
 from src.adapters.errors import AdapterError, Category, Diagnostic, Field
 from src.config import constants
 from src.config.utils import get_thumbnail_path
+from src.managers.image_assets import EXTENSIONS, create_thumbnail
 from src.models.platform_config import PlatformConfig
 from src.models.task import GenerationTask
 
@@ -216,7 +217,7 @@ class BaseAdapter(ABC):
                     await asyncio.to_thread(Path(save_path).write_bytes, data)
                 # Keep file extensions consistent with the provider's actual encoding.
                 with Image.open(save_path) as image:
-                    extension = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}.get(image.format or "")
+                    extension = EXTENSIONS.get(image.format or "")
                     image.verify()
                 if not extension:
                     raise ValueError("返回的文件不是支持的 PNG、JPEG 或 WebP 图片")
@@ -234,13 +235,7 @@ class BaseAdapter(ABC):
         return paths
 
     def _create_thumbnail(self, image_path: str):
-        thumb_path = get_thumbnail_path(image_path)
-        if not thumb_path:
-            return
-        os.makedirs(constants.THUMBNAILS_DIR, exist_ok=True)
         try:
-            with Image.open(image_path) as img:
-                img.thumbnail((320, 320))
-                img.convert("RGB").save(thumb_path, "JPEG", quality=85, optimize=True)
+            create_thumbnail(image_path)
         except Exception:
             pass

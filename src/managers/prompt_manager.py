@@ -1,6 +1,7 @@
 from typing import Optional
 
 from src.config import database
+from src.managers.reference_manager import retain_settings
 
 
 class PromptManager:
@@ -26,7 +27,7 @@ class PromptManager:
     async def save_template(self, template: dict) -> int:
         if not self._db:
             return -1
-        return await self._db.save_prompt_template(template)
+        return await self._db.save_prompt_template(await retain_settings(template, missing_ok=True))
 
     async def delete_template(self, template_id: int):
         if self._db:

@@ -15,6 +15,7 @@ from src.config import constants, database
 from src.config.event_loop import close_app_loop, get_app_loop, schedule_async, set_app_loop
 from src.desktop import StudioBridge
 from src.managers import HistoryManager, PromptManager, QueueManager
+from src.managers.reference_manager import migrate_references
 from src.widgets.main_window import MainWindow
 from src.widgets.theme import APP_STYLESHEET, app_font
 
@@ -52,6 +53,7 @@ class ImageMakerApp(QApplication):
         # 初始化数据库
         self._db = database.Database.get_instance()
         await self._db.connect()
+        await migrate_references(self._db)
 
         # 初始化适配器
         init_adapters()
@@ -123,6 +125,8 @@ class ImageMakerApp(QApplication):
             await asyncio.gather(*pending, return_exceptions=True)
         if self._bridge:
             await self._bridge.shutdown()
+        elif self._main_window:
+            await self._main_window.task_chain_manager.shutdown()
         queue_mgr = QueueManager.get_instance()
         await queue_mgr.stop()
         if self._db:

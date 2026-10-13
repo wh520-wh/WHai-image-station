@@ -1,3 +1,5 @@
+from concurrent.futures import Future
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -23,6 +25,7 @@ class GenerationTask:
     created_at: datetime = field(default_factory=datetime.now)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    _completion: Future[str] = field(default_factory=Future, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {
@@ -33,10 +36,10 @@ class GenerationTask:
             "model_config_id": self.model_config_id,
             "prompt": self.prompt,
             "negative_prompt": self.negative_prompt,
-            "params": self.params,
+            "params": deepcopy(self.params),
             "reference_image_path": self.reference_image_path,
             "status": self.status,
-            "result_paths": self.result_paths,
+            "result_paths": list(self.result_paths),
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,

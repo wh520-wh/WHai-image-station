@@ -128,9 +128,16 @@ def test_minimax_prompt_length_matches_existing_adapter_validation():
 
 
 @pytest.mark.asyncio
-async def test_workflow_options_round_trip_and_execute_without_losing_reference(tmp_path):
+async def test_workflow_options_round_trip_and_execute_without_losing_reference(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from PIL import Image
+
+    from src.config import constants
+
+    monkeypatch.setattr(constants, "GENERATIONS_DIR", str(tmp_path / "images"))
     reference = tmp_path / "reference.png"
-    reference.write_bytes(b"offline-reference")
+    Image.new("RGB", (16, 12), "green").save(reference)
     tasks = [
         {
             "prompt": "edit a landscape",
@@ -151,6 +158,9 @@ async def test_workflow_options_round_trip_and_execute_without_losing_reference(
             task.status = "COMPLETED"
             return str(task.id)
 
+        async def wait_for_task(self, task):
+            return task.status
+
     queue = CompletingQueue()
     db_path = str(tmp_path / "workflow.db")
     db = Database(db_path)
@@ -166,12 +176,13 @@ async def test_workflow_options_round_trip_and_execute_without_losing_reference(
         restored = TaskChainManager(restored_db, queue)
         await restored.load_chains()
         saved = restored.get_chain(chain_id)
-        assert saved["tasks"][0]["reference_image_path"] == str(reference)
+        retained = saved["tasks"][0]["reference_image_path"]
+        assert Path(retained).read_bytes() == reference.read_bytes()
         assert saved["tasks"][1]["negative_prompt"] == "blur"
         assert saved["tasks"][1]["params"]["seed"] == 0
         await restored.start_chain(chain_id)
         assert len(queue.tasks) == 2
-        assert queue.tasks[0].reference_image_path == str(reference)
+        assert queue.tasks[0].reference_image_path == retained
         assert queue.tasks[0].params["background"] == "transparent"
         assert queue.tasks[1].reference_image_path is None
         assert queue.tasks[1].negative_prompt == "blur"
