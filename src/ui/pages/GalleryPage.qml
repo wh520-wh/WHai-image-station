@@ -177,6 +177,25 @@ Item {
                                     onTapped: studio.viewRecord(record)
                                 }
                                 Rectangle {
+                                    visible: (record.images || []).length > 1
+                                    anchors.left: parent.left
+                                    anchors.bottom: parent.bottom
+                                    anchors.margins: 8
+                                    width: resultCount.implicitWidth + 18
+                                    height: 25
+                                    radius: 8
+                                    color: Theme.surface
+                                    border.color: Theme.border
+                                    Caption {
+                                        id: resultCount
+                                        anchors.centerIn: parent
+                                        text: (record.images || []).length + " 张"
+                                        color: Theme.ink
+                                        font.weight: Font.DemiBold
+                                        font.pixelSize: 11
+                                    }
+                                }
+                                Rectangle {
                                     anchors.right: parent.right
                                     anchors.top: parent.top
                                     anchors.margins: 8

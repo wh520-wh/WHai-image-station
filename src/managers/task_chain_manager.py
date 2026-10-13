@@ -168,6 +168,7 @@ class TaskChainManager:
                     params=params,
                     status=task_data.get("status", "pending"),
                     trigger_on=task_data.get("trigger_on", "success"),
+                    reference_image_path=task_data.get("reference_image_path"),
                 )
             )
         created_at = existing.created_at if existing else self._parse_created_at(chain_data.get("created_at"))

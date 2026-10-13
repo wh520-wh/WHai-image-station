@@ -74,6 +74,8 @@ def main():
         del engine
         app.processEvents()
     close_app_loop()
+    if warnings:
+        raise RuntimeError("QML warnings during preview: " + "\n".join(warnings))
     print(f"Captured 9 views in {output}")
 
 

@@ -15,6 +15,7 @@ class ChainTask:
     params: dict = field(default_factory=dict)
     status: str = "pending"  # pending, generating, completed, failed, skipped
     trigger_on: str = "success"  # success, failure, any
+    reference_image_path: str | None = None
 
 
 @dataclass
@@ -41,6 +42,7 @@ class TaskChain:
                     "params": t.params,
                     "status": t.status,
                     "trigger_on": t.trigger_on,
+                    "reference_image_path": t.reference_image_path,
                 }
                 for t in self.tasks
             ],

@@ -28,19 +28,33 @@ python -m src.main
 ## 运行测试
 
 ```bash
-pytest                          # 全部测试
-pytest tests/managers/          # 仅 manager 测试
-pytest -k "database"            # 按名字过滤
-pytest --cov=src                # 覆盖率
+python -m pytest                         # 全部测试
+python -m pytest tests/managers/          # 仅 manager 测试
+python -m pytest -k "database"            # 按名字过滤
+python -m pytest --cov=src                # 覆盖率
 ```
 
 ## 代码质量工具
 
 ```bash
-ruff check src/                 # lint
-ruff format src/                # 自动格式化
-pyright src/                    # 静态类型检查（basic 模式）
+python -m ruff check src build.py tools    # lint
+python -m ruff format src/                # 自动格式化
 ```
+
+Windows PowerShell 的类型检查使用实际解释器路径，确保 Pyright 读取同一个环境中安装的依赖：
+
+```powershell
+$pythonExecutable = (python -c "import sys; print(sys.executable)").Trim()
+& $pythonExecutable -m pyright --pythonpath $pythonExecutable src
+```
+
+## CI 与打包验证
+
+`.github/workflows/checks.yml` 在 Windows、Python 3.12 环境安装 `.[dev,build]`，解析一次 `sys.executable`，随后通过该绝对路径运行安装、Ruff、Pyright、离线测试和 `build.py`。`--pythonpath` 也传入实际解释器路径，避免将 `python` 当成相对文件路径解析。
+
+CI 使用 `QT_QPA_PLATFORM=offscreen` 和 `QT_QUICK_BACKEND=software`。测试通过后构建便携 EXE，再以 `--smoke-test=<临时目录>` 隐藏启动并等待退出；超过 30 秒、退出码非零、报告未就绪、图标未加载、六个页面不完整或出现 QML 警告都会失败。报告作为 `packaged-startup-report` 保存 7 天，便于排查打包问题。这些检查使用隔离数据，不调用真实生图 API，也不创建或发布 Release。
+
+目前依赖按 `pyproject.toml` 的版本范围安装，尚未锁定具体版本；CI 验证的是当次解析出的环境，不能替代依赖锁定。
 
 ## 项目结构
 

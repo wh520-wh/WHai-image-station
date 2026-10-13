@@ -22,6 +22,7 @@ ApplicationWindow {
     palette.highlight: Theme.accent
     palette.highlightedText: Theme.accentText
     property string currentPage: "create"
+    readonly property bool modalOpen: viewer.visible || confirmDialog.visible
     property var visitedPages: ["create"]
     onCurrentPageChanged: if (visitedPages.indexOf(currentPage) < 0)
         visitedPages = visitedPages.concat([currentPage])
@@ -83,7 +84,7 @@ ApplicationWindow {
         }
         function onViewerRequested(record) {
             viewer.record = record;
-            viewer.imageIndex = 0;
+            viewer.imageIndex = record.selected_image_index || 0;
             viewer.zoom = 1;
             viewer.angle = 0;
             viewer.open();
@@ -663,6 +664,16 @@ ApplicationWindow {
                         text: "复制图片"
                         Layout.fillWidth: true
                         onClicked: studio.copyImage(viewer.currentPath)
+                    }
+                }
+                MButton {
+                    text: "作为参考图"
+                    Layout.fillWidth: true
+                    visible: !!viewer.currentPath
+                    enabled: s.caps.reference
+                    onClicked: {
+                        studio.useImageAsReference(viewer.currentPath);
+                        viewer.close();
                     }
                 }
                 MButton {

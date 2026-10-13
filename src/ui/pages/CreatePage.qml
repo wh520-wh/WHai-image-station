@@ -7,10 +7,25 @@ Item {
     id: page
     property var shell
     readonly property var s: studio.state
-    readonly property var latest: s.latest || ({})
+    readonly property var preview: s.preview || ({})
+    readonly property var previewImages: preview.images || []
+    readonly property int imageIndex: s.previewImageIndex || 0
+    readonly property string imagePath: (preview.result_paths || [])[imageIndex] || preview.image_path || ""
+    readonly property string imageUrl: previewImages[imageIndex] || preview.imageUrl || ""
+    readonly property bool compact: page.height < 650
+    function statusText(status) {
+        return ({
+                WAITING: "排队中",
+                PENDING: "准备请求",
+                GENERATING: "正在生成",
+                COMPLETED: "生成完成",
+                FAILED: "生成失败",
+                CANCELLED: "已取消"
+            })[status] || "等待创作";
+    }
     Shortcut {
         sequence: "Ctrl+Return"
-        enabled: page.visible
+        enabled: page.visible && !templateDialog.visible && !(page.shell && page.shell.modalOpen)
         onActivated: studio.generate()
     }
     RowLayout {
@@ -146,6 +161,7 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.minimumWidth: 0
                                 model: s.caps.qualities
+                                displayText: String(s.draft.quality)
                                 currentIndex: s.caps.qualities.indexOf(s.draft.quality)
                                 onActivated: studio.setDraft("quality", currentText)
                             }
@@ -159,6 +175,7 @@ Item {
                             MCombo {
                                 Layout.fillWidth: true
                                 model: s.caps.counts.map(x => String(x))
+                                displayText: String(s.draft.n)
                                 currentIndex: model.indexOf(String(s.draft.n))
                                 onActivated: studio.setDraft("n", Number(currentText))
                             }
@@ -305,23 +322,147 @@ Item {
             Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 280
+                Layout.minimumHeight: 160
                 radius: 16
                 color: Theme.surface
                 border.color: Theme.border
                 clip: true
-                Image {
+                ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 12
-                    source: page.latest.imageUrl || ""
-                    sourceSize: Qt.size(1600, 1600)
-                    asynchronous: true
-                    fillMode: Image.PreserveAspectFit
-                    visible: source !== ""
+                    anchors.margins: 16
+                    spacing: 10
+                    RowLayout {
+                        visible: !!page.preview.task_id
+                        Layout.fillWidth: true
+                        Caption {
+                            text: page.statusText(page.preview.status)
+                            font.weight: Font.DemiBold
+                            color: page.preview.status === "FAILED" ? Theme.danger : Theme.accent
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                        Caption {
+                            text: s.previewElapsed || ""
+                        }
+                    }
+                    Caption {
+                        visible: !!page.preview.task_id
+                        text: [page.preview.sourceText, page.preview.modelText].filter(x => !!x).join(" · ")
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Image {
+                            id: previewPicture
+                            objectName: "previewPicture"
+                            anchors.fill: parent
+                            source: page.imageUrl
+                            sourceSize: Qt.size(1600, 1600)
+                            asynchronous: true
+                            fillMode: Image.PreserveAspectFit
+                            visible: source !== ""
+                        }
+                        Skeleton {
+                            anchors.fill: parent
+                            visible: previewPicture.status === Image.Loading
+                        }
+                        EmptyState {
+                            anchors.fill: parent
+                            visible: !!page.preview.task_id && (!page.imageUrl || previewPicture.status === Image.Error)
+                            title: page.preview.status === "FAILED" ? "这次生成没有完成" : page.statusText(page.preview.status)
+                            detail: page.preview.status === "FAILED" ? "查看原因后，可以调整提示词与参数再试。" : page.preview.status === "WAITING" ? "轮到这个任务时会自动开始，你可以继续编辑。" : page.preview.status === "CANCELLED" ? "这个任务已取消，可以选择其他任务查看。" : page.imageUrl ? "图片暂时无法读取，作品详情保留了生成记录。" : "正在等待模型返回结果，完成后图片会出现在这里。"
+                            iconName: page.preview.status === "FAILED" ? "image" : "bolt"
+                        }
+                    }
+                    ListView {
+                        id: imageStrip
+                        objectName: "previewImageStrip"
+                        visible: page.previewImages.length > 1
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 58
+                        orientation: ListView.Horizontal
+                        spacing: 8
+                        clip: true
+                        model: page.previewImages
+                        currentIndex: page.imageIndex
+                        onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+                        delegate: MButton {
+                            required property int index
+                            required property string modelData
+                            width: 58
+                            height: 58
+                            padding: 4
+                            Accessible.name: "选择第 " + (index + 1) + " 张图片"
+                            background: Rectangle {
+                                radius: 8
+                                color: Theme.subtle
+                                border.color: index === page.imageIndex || parent.activeFocus ? Theme.accent : Theme.border
+                                border.width: index === page.imageIndex || parent.activeFocus ? 2 : 1
+                            }
+                            contentItem: Image {
+                                source: modelData
+                                sourceSize: Qt.size(116, 116)
+                                asynchronous: true
+                                fillMode: Image.PreserveAspectFit
+                            }
+                            onClicked: studio.selectPreviewImage(index)
+                        }
+                    }
+                    RowLayout {
+                        visible: !!page.preview.task_id
+                        Layout.fillWidth: true
+                        Caption {
+                            visible: page.previewImages.length > 1
+                            text: "第 " + (page.imageIndex + 1) + " / " + page.previewImages.length + " 张"
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                        MButton {
+                            id: viewPreviewButton
+                            objectName: "viewPreviewButton"
+                            text: page.preview.status === "FAILED" ? "查看原因" : "作品详情"
+                            quiet: true
+                            onClicked: studio.viewPreview()
+                        }
+                    }
+                    Flow {
+                        visible: !!page.imagePath
+                        Layout.fillWidth: true
+                        spacing: 6
+                        MButton {
+                            id: copyPreviewButton
+                            objectName: "copyPreviewButton"
+                            text: "复制图片"
+                            quiet: true
+                            onClicked: studio.copyImage(page.imagePath)
+                        }
+                        MButton {
+                            id: savePreviewButton
+                            objectName: "savePreviewButton"
+                            text: "另存图片"
+                            quiet: true
+                            onClicked: studio.saveImage(page.imagePath)
+                        }
+                        MButton {
+                            id: referencePreviewButton
+                            objectName: "referencePreviewButton"
+                            text: "作为参考图"
+                            quiet: true
+                            enabled: s.caps.reference
+                            ToolTip.visible: hovered && !enabled
+                            ToolTip.text: "当前模型不支持参考图，请先更换模型。"
+                            onClicked: studio.useImageAsReference(page.imagePath)
+                        }
+                    }
                 }
                 Item {
                     anchors.fill: parent
-                    visible: !page.latest.imageUrl
+                    visible: !page.preview.task_id && !page.imageUrl
                     Rectangle {
                         anchors.centerIn: parent
                         width: Math.min(parent.width * 0.48, 220)
@@ -361,30 +502,6 @@ Item {
                         text: "你的下一张作品，从这里开始。"
                     }
                 }
-                MButton {
-                    visible: !!page.latest.imageUrl
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    anchors.margins: 20
-                    text: "查看作品"
-                    onClicked: studio.viewRecord(page.latest)
-                }
-                Rectangle {
-                    visible: s.activeCount > 0
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.margins: 18
-                    radius: 12
-                    color: Theme.accentWash
-                    width: progressText.width + 28
-                    height: 30
-                    Caption {
-                        id: progressText
-                        anchors.centerIn: parent
-                        text: s.activeCount + " 个任务处理中"
-                        color: Theme.accent
-                    }
-                }
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -401,18 +518,35 @@ Item {
             }
             ListView {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 154
+                Layout.preferredHeight: page.compact ? 106 : 146
                 clip: true
                 spacing: 8
                 model: s.tasks
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Rectangle {
+                    id: taskCard
                     required property var modelData
+                    readonly property bool selected: modelData.task_id === s.selectedTaskId
+                    objectName: "queueTask_" + modelData.task_id
                     width: ListView.view.width
                     height: 68
                     radius: 10
-                    color: Theme.surface
-                    border.color: Theme.border
+                    color: selected ? Theme.accentWash : Theme.surface
+                    border.color: selected || activeFocus ? Theme.accent : Theme.border
+                    border.width: activeFocus ? 2 : 1
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: modelData.prompt + "，" + page.statusText(modelData.status)
+                    Accessible.onPressAction: studio.selectTask(modelData.task_id)
+                    Keys.onReturnPressed: studio.selectTask(modelData.task_id)
+                    Keys.onEnterPressed: studio.selectTask(modelData.task_id)
+                    Keys.onSpacePressed: studio.selectTask(modelData.task_id)
+                    TapHandler {
+                        onTapped: {
+                            taskCard.forceActiveFocus();
+                            studio.selectTask(taskCard.modelData.task_id);
+                        }
+                    }
                     RowLayout {
                         anchors.fill: parent
                         anchors.margins: 12
@@ -435,14 +569,7 @@ Item {
                                 Layout.fillWidth: true
                             }
                             Caption {
-                                text: ({
-                                        WAITING: "等待中",
-                                        PENDING: "准备请求",
-                                        GENERATING: "正在生成",
-                                        COMPLETED: "已完成",
-                                        FAILED: "失败",
-                                        CANCELLED: "已取消"
-                                    })[modelData.status] || modelData.status
+                                text: page.statusText(modelData.status)
                                 color: modelData.status === "FAILED" ? Theme.danger : Theme.muted
                             }
                         }

@@ -6,7 +6,7 @@ import httpx
 
 from src.adapters.errors import Category, Diagnostic, Field
 from src.config import constants
-from src.config.providers import RETIRED_MODELS
+from src.config.providers import RETIRED_MODELS, model_capabilities
 from src.models.platform_config import PlatformConfig
 from src.models.task import GenerationTask
 
@@ -78,18 +78,22 @@ class OpenAIAdapter(BaseAdapter):
         if params.get("style"):
             payload["style"] = params["style"]
         gpt_image = str(payload["model"] or "").startswith("gpt-image-")
+        caps = model_capabilities(config.interface_type if config else "openai_images", str(payload["model"] or ""))
         if gpt_image:
             payload["quality"] = {"standard": "auto", "hd": "high"}.get(
                 str(payload.get("quality") or "auto"), payload.get("quality", "auto")
             )
             payload["size"] = {"1792x1024": "1536x1024", "1024x1792": "1024x1536"}.get(payload["size"], payload["size"])
             payload.pop("style", None)
-            for key in ("output_format", "background"):
-                if params.get(key):
-                    payload[key] = params[key]
+            if caps["format"]:
+                for key in ("output_format", "background"):
+                    if params.get(key):
+                        payload[key] = params[key]
             if payload.get("background") == "transparent" and payload.get("output_format") == "jpeg":
                 raise ValueError("透明背景请选择 PNG 或 WebP 格式")
-        if task.negative_prompt and not gpt_image:
+        if caps["seed"] and params.get("seed") is not None:
+            payload["seed"] = params["seed"]
+        if task.negative_prompt and caps["negative"]:
             payload["negative_prompt"] = task.negative_prompt
         return payload
 

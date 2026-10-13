@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import QFileDialog
 from src.config import constants, encryption
 from src.config.database import Database
 from src.config.event_loop import schedule_async
+from src.config.generation import generation_options
 from src.config.providers import (
     INTERFACE_LABELS,
     PROVIDER_PRESETS,
@@ -105,6 +107,7 @@ class StudioBridge(QObject):
         self._query = ""
         self._filter = ""
         self._gallery_revision = 0
+        self._preview_revision = 0
         self._state = {
             "ready": False,
             "loadingText": "正在打开工作台…",
@@ -115,6 +118,10 @@ class StudioBridge(QObject):
             "activeSources": [],
             "activeModels": [],
             "tasks": [],
+            "selectedTaskId": "",
+            "preview": {},
+            "previewImageIndex": 0,
+            "previewElapsed": "",
             "prompts": [],
             "chains": [],
             "sourceId": "",
@@ -160,8 +167,10 @@ class StudioBridge(QObject):
         return self.gallery
 
     def update(self, **values):
-        self._state.update(values)
-        self.stateChanged.emit()
+        changed = {key: value for key, value in values.items() if self._state.get(key) != value}
+        if changed:
+            self._state.update(changed)
+            self.stateChanged.emit()
 
     def launch(self, operation, success=None, busy=False):
         if busy and self._state["busy"]:
@@ -275,12 +284,16 @@ class StudioBridge(QObject):
             draft.update(size=model["default_size"], quality=model["default_quality"], n=model["default_n"])
         if draft["size"] not in caps["sizes"] and not (caps["custom_size"] and valid_dimensions(draft["size"])):
             draft["size"] = caps["sizes"][0]
-        if draft["quality"] not in caps["qualities"]:
+        compatible = source.get("interface_type") == "custom" or (
+            source.get("interface_type") == "openai_images" and model and not model["model_id"].startswith("gpt-image-")
+        )
+        if not str(draft["quality"]).strip() or (not compatible and draft["quality"] not in caps["qualities"]):
             draft["quality"] = caps["qualities"][0]
-        if safe_int(draft["n"], 1) not in caps["counts"]:
+        count = safe_int(draft["n"], 1)
+        if count < 1 or (len(caps["counts"]) == 1 and count != caps["counts"][0]):
             draft["n"] = caps["counts"][0]
         else:
-            draft["n"] = safe_int(draft["n"], 1)
+            draft["n"] = count
         self.update(modelId=model["id"] if model else "", caps=caps, draft=draft)
 
     @Slot(str, "QVariant")
@@ -290,14 +303,15 @@ class StudioBridge(QObject):
             draft[key] = value
             self.update(draft=draft)
 
-    def task_from_draft(self, prompt=None):
+    def task_from_draft(self, prompt=None, require_key=True):
         source = next((s for s in self._sources if s["id"] == self._state["sourceId"]), None)
         model = next((m for m in self._models if m["id"] == self._state["modelId"]), None)
         draft = self._state["draft"]
-        if not source or not model:
+        if not source or not model or model["source_id"] != source["id"]:
             raise ValueError("请先添加来源，并至少启用一个模型。")
         if (
-            not source.get("api_key_encrypted")
+            require_key
+            and not source.get("api_key_encrypted")
             and source["auth_preset"] != "none"
             and not parse_headers(source.get("custom_headers"))
         ):
@@ -307,27 +321,12 @@ class StudioBridge(QObject):
             raise ValueError("先写下你想生成的画面。")
         if model["model_id"] in RETIRED_MODELS and QUrl(source["api_base_url"]).host() == "api.openai.com":
             raise ValueError("这个官方模型已退役，请选择 GPT Image 模型。")
-        caps = self._state["caps"]
-        if caps["custom_size"] and not valid_dimensions(draft["size"]):
-            raise ValueError("尺寸请填写正整数宽高，例如 1280x768。")
-        params = {"size": draft["size"], "quality": draft["quality"], "n": int(draft["n"])}
-        params["size"] = str(params["size"]).replace("×", "x").lower()
-        if caps["seed"] and str(draft["seed"]).strip():
-            params["seed"] = int(draft["seed"])
-        if caps["format"]:
-            params["output_format"] = draft["output_format"]
-            if draft["transparent"]:
-                if draft["output_format"] == "jpeg":
-                    raise ValueError("透明背景请选择 PNG 或 WebP。")
-                params["background"] = "transparent"
         return GenerationTask(
             platform_id=adapter_id(source["interface_type"]),
             source_id=source["id"],
             model_config_id=model["id"],
             prompt=text,
-            params=params,
-            negative_prompt=draft["negative_prompt"] if caps["negative"] else "",
-            reference_image_path=draft["reference"] if caps["reference"] else None,
+            **generation_options(source["interface_type"], model["model_id"], dict(draft, prompt=text)),
         )
 
     @Slot()
@@ -336,13 +335,18 @@ class StudioBridge(QObject):
             task = self.task_from_draft()
             self.queue.add_task(task)
             self.refresh_tasks()
+            self.selectTask(str(task.id))
             self.message.emit("已加入队列，可以继续编辑下一张。", False)
         except (ValueError, TypeError) as error:
             self.message.emit(str(error), True)
 
     @Slot(str)
     def cancelTask(self, task_id):
-        self.queue.cancel_task(task_id)
+        cancelled = self.queue.cancel_task(task_id)
+        if cancelled and self._state["selectedTaskId"] == task_id:
+            self._publish_preview(
+                dict(self._state["preview"], status="CANCELLED", completed_at=datetime.now().isoformat())
+            )
         self.refresh_tasks()
 
     def refresh_tasks(self):
@@ -354,6 +358,102 @@ class StudioBridge(QObject):
             item["params"] = {k: v for k, v in item["params"].items() if not k.startswith("_")}
             items.append(item)
         self.update(tasks=items, activeCount=sum(t["status"] in ("WAITING", "PENDING", "GENERATING") for t in items))
+        selected = next((task for task in items if task["task_id"] == self._state["selectedTaskId"]), None)
+        if selected:
+            # Keep persisted diagnostics when a later refresh contains only queue fields.
+            self._publish_preview(dict(self._state["preview"], **selected))
+
+    def _present_record(self, row):
+        record = dict(row)
+        paths = list(record.get("result_paths") or [])
+        if not paths and record.get("image_path"):
+            paths = [record["image_path"]]
+        record["result_paths"] = paths
+        record["image_path"] = record.get("image_path") or (paths[0] if paths else "")
+        record["images"] = [file_url(path) for path in paths]
+        record["imageUrl"] = file_url(record["image_path"])
+        record["thumbnailUrl"] = file_url(record.get("thumbnail_path") or record["image_path"])
+        record["dateText"] = (record.get("created_at") or "").replace("T", " ")[:16]
+        record["modelText"] = next(
+            (model["display_name"] for model in self._models if model["id"] == record.get("model_config_id")),
+            record.get("platform_id") or "",
+        )
+        record["sourceText"] = next(
+            (source["name"] for source in self._sources if source["id"] == record.get("source_id")), ""
+        )
+        record.pop("id", None)
+        record["params"] = {
+            key: value for key, value in (record.get("params") or {}).items() if not key.startswith("_")
+        }
+        return record
+
+    def _publish_preview(self, record):
+        record = self._present_record(record)
+        index = min(self._state["previewImageIndex"], max(0, len(record["images"]) - 1))
+        self.update(preview=record, previewImageIndex=index)
+        self._refresh_preview_elapsed()
+
+    def _refresh_preview_elapsed(self):
+        record = self._state["preview"]
+        start = record.get("started_at") or record.get("created_at")
+        elapsed = ""
+        if start:
+            try:
+                begin = datetime.fromisoformat(start)
+                end = (
+                    datetime.fromisoformat(record["completed_at"])
+                    if record.get("completed_at")
+                    else datetime.now(begin.tzinfo)
+                )
+                seconds = max(0, int((end - begin).total_seconds()))
+                label = (
+                    "已等待" if record.get("status") == "WAITING" else "耗时" if record.get("started_at") else "总用时"
+                )
+                elapsed = f"{label} {seconds // 60}:{seconds % 60:02d}"
+            except (TypeError, ValueError):
+                pass
+        self.update(previewElapsed=elapsed)
+
+    @Slot(str)
+    def selectTask(self, task_id):
+        self._preview_revision += 1
+        revision = self._preview_revision
+        if task_id != self._state["selectedTaskId"]:
+            self.update(selectedTaskId=task_id, preview={}, previewImageIndex=0, previewElapsed="")
+        queued = next((task for task in self._state["tasks"] if task["task_id"] == task_id), None)
+        if queued:
+            self._publish_preview(dict(self._state["preview"], **queued))
+        if not self.db or (queued and queued["status"] not in ("COMPLETED", "FAILED")):
+            return
+
+        async def load():
+            assert self.db
+            record = await self.db.get_history_by_task_id(task_id)
+            if record and revision == self._preview_revision and task_id == self._state["selectedTaskId"]:
+                self._publish_preview(dict(self._state["preview"], **record))
+
+        self.launch(load())
+
+    @Slot(int)
+    def selectPreviewImage(self, index):
+        if 0 <= index < len(self._state["preview"].get("images", [])):
+            self.update(previewImageIndex=index)
+
+    @Slot()
+    def viewPreview(self):
+        if self._state["preview"]:
+            self.viewRecord(dict(self._state["preview"], selected_image_index=self._state["previewImageIndex"]))
+
+    @Slot(str)
+    def useImageAsReference(self, path):
+        if not self._state["caps"]["reference"]:
+            self.message.emit("当前模型不支持参考图，请先选择支持参考图的模型。", True)
+        elif not Path(path).is_file():
+            self.message.emit("图片文件不存在，请重新选择。", True)
+        else:
+            self.setDraft("reference", path)
+            self.navigate.emit("create")
+            self.message.emit("已作为参考图，可修改提示词继续创作。", False)
 
     def _drain_events(self):
         events = self.queue.drain_status_events()
@@ -361,6 +461,11 @@ class StudioBridge(QObject):
             self.refresh_tasks()
             if any(event in ("completed", "failed") for _, event in events):
                 self.launch(self.load_gallery())
+                if any(
+                    str(task.id) == self._state["selectedTaskId"] and event in ("completed", "failed")
+                    for task, event in events
+                ):
+                    self.selectTask(self._state["selectedTaskId"])
             for task, event in events:
                 if task.params.get("_persistence_error"):
                     self.message.emit("图片已处理，但历史记录保存失败：" + str(task.params["_persistence_error"]), True)
@@ -368,6 +473,8 @@ class StudioBridge(QObject):
                     self.message.emit(task.error or "生成失败，请在作品详情查看诊断。", True)
         if self.chains and self.chains.drain_status_events():
             self.refresh_chains()
+        if self._state["preview"].get("status") in ("WAITING", "PENDING", "GENERATING"):
+            self._refresh_preview_elapsed()
 
     @Slot()
     def chooseReference(self):
@@ -465,15 +572,18 @@ class StudioBridge(QObject):
             draft = self._state["draft"]
             if not name.strip() or not draft["prompt"].strip():
                 raise ValueError("模板需要名称和提示词，请先在创作页填写画面。")
+            task = self.task_from_draft(require_key=False)
             await self.db.save_prompt_template(
                 {
                     "name": name.strip(),
                     "prompt": draft["prompt"],
-                    "negative_prompt": draft["negative_prompt"],
+                    "negative_prompt": task.negative_prompt,
                     "category": category,
                     "source_id": self._state["sourceId"],
                     "model_config_id": self._state["modelId"],
-                    "params": {k: v for k, v in draft.items() if k not in ("prompt", "reference", "negative_prompt")},
+                    "params": dict(task.params, reference_image_path=task.reference_image_path)
+                    if task.reference_image_path
+                    else task.params,
                 }
             )
             await self.reload_prompts()
@@ -508,6 +618,7 @@ class StudioBridge(QObject):
                 draft[key] = params[key]
         if params.get("background") == "transparent":
             draft["transparent"] = True
+        draft["reference"] = template.get("reference_image_path") or params.get("reference_image_path") or ""
         self.update(draft=draft)
         self.selectModel(self._state["modelId"])
         self.navigate.emit("create")
@@ -523,19 +634,14 @@ class StudioBridge(QObject):
             )
             if revision != self._gallery_revision:
                 return
-            for row in rows:
-                row["thumbnailUrl"] = file_url(row.get("thumbnail_path") or row.get("image_path"))
-                row["imageUrl"] = file_url(row.get("image_path"))
-                row["images"] = [file_url(p) for p in row.get("result_paths", [])]
-                row["dateText"] = (row.get("created_at") or "").replace("T", " ")[:16]
-                row["modelText"] = next(
-                    (m["display_name"] for m in self._models if m["id"] == row.get("model_config_id")),
-                    row.get("platform_id") or "",
-                )
+            rows = [self._present_record(row) for row in rows]
             self.gallery.append(rows) if append else self.gallery.replace(rows)
             self.update(galleryTotal=total, galleryHasMore=len(self.gallery.records) < total)
             if not append and not self._query and not self._filter:
                 self.update(latest=next((row for row in rows if row.get("image_path")), {}))
+                if not self._state["selectedTaskId"] and self._state["latest"]:
+                    self.update(selectedTaskId=self._state["latest"]["task_id"])
+                    self._publish_preview(self._state["latest"])
         finally:
             if revision == self._gallery_revision:
                 self.update(galleryLoading=False)
@@ -603,7 +709,8 @@ class StudioBridge(QObject):
             self.update(chains=self.chains.get_all_chains())
 
     @Slot(str, str, str)
-    def saveChain(self, chain_id, name, prompts):
+    @Slot(str, str, str, bool)
+    def saveChain(self, chain_id, name, prompts, use_current_settings=False):
         async def save():
             assert self.chains
             if not name.strip():
@@ -615,20 +722,34 @@ class StudioBridge(QObject):
             if existing and existing["status"] in ("running", "paused"):
                 raise ValueError("先停止流程，再修改步骤。")
             tasks = []
+            previous = (existing or {}).get("tasks", [])
+            current = None
+            if not previous or use_current_settings:
+                current = self.task_from_draft(prompt=lines[0], require_key=False)
             for i, line in enumerate(lines):
-                # Creating a workflow requires a model, but does not require a key until it starts.
-                if not self._state["modelId"]:
-                    raise ValueError("请先在创作页选择来源和模型。")
-                tasks.append(
-                    {
-                        "chain_order": i,
-                        "prompt": line,
-                        "source_id": self._state["sourceId"],
-                        "model_config_id": self._state["modelId"],
-                        "params": {k: self._state["draft"][k] for k in ("size", "quality", "n")},
+                if current:
+                    settings = {
+                        "source_id": current.source_id,
+                        "model_config_id": current.model_config_id,
+                        "negative_prompt": current.negative_prompt,
+                        "params": dict(current.params),
+                        "reference_image_path": current.reference_image_path,
                     }
-                )
-            await self.chains.create_chain({"id": chain_id, "name": name.strip(), "tasks": tasks, "status": "idle"})
+                else:
+                    settings = dict(previous[min(i, len(previous) - 1)])
+                    settings["params"] = dict(settings.get("params") or {})
+                    if i >= len(previous):
+                        settings.pop("task_id", None)
+                tasks.append(dict(settings, chain_order=i, prompt=line, status="pending"))
+            await self.chains.create_chain(
+                {
+                    "id": chain_id,
+                    "name": name.strip(),
+                    "tasks": tasks,
+                    "status": "idle",
+                    "failure_mode": (existing or {}).get("failure_mode", "stop"),
+                }
+            )
             self.refresh_chains()
 
         self.launch(save(), lambda _: self.message.emit("流程已保存。", False))
@@ -639,6 +760,10 @@ class StudioBridge(QObject):
             return
         if action == "start":
             chain = self.chains.get_chain(chain_id)
+            if not chain or not chain["tasks"]:
+                self.message.emit("流程没有可执行步骤，请先编辑流程。", True)
+                return
+            prepared = []
             for task in (chain or {}).get("tasks", []):
                 source = next((s for s in self._sources if s["id"] == task["source_id"]), {})
                 if not source.get("is_active") or not any(
@@ -654,6 +779,40 @@ class StudioBridge(QObject):
                 ):
                     self.message.emit("流程的来源还没有配置密钥，请先在「来源」保存配置。", True)
                     return
+                model = next(model for model in self._models if model["id"] == task["model_config_id"])
+                params = task.get("params") or {}
+                try:
+                    if (
+                        task.get("reference_image_path")
+                        and not model_capabilities(source["interface_type"], model["model_id"])["reference"]
+                    ):
+                        raise ValueError("当前模型不支持流程中的参考图，请更换模型或重新保存设置。")
+                    options = generation_options(
+                        source["interface_type"],
+                        model["model_id"],
+                        dict(
+                            params,
+                            prompt=task["prompt"],
+                            negative_prompt=task.get("negative_prompt") or "",
+                            reference=task.get("reference_image_path") or "",
+                            transparent=params.get("background") == "transparent" or params.get("transparent", False),
+                        ),
+                    )
+                    managed = {"size", "quality", "n", "seed", "output_format", "background", "transparent"}
+                    options["params"] = {
+                        **{key: value for key, value in params.items() if key not in managed},
+                        **options["params"],
+                    }
+                    prepared.append(options)
+                except ValueError as error:
+                    self.message.emit("流程参数需要调整：" + str(error), True)
+                    return
+            runtime_chain = self.chains.get_chain_status(chain_id)
+            assert runtime_chain
+            for task, options in zip(runtime_chain.tasks, prepared, strict=True):
+                task.params = options["params"]
+                task.negative_prompt = options["negative_prompt"]
+                task.reference_image_path = options["reference_image_path"]
             self.chains.start_chain_background(chain_id)
             self.refresh_chains()
         elif action in ("pause", "stop"):

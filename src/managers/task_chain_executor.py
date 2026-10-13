@@ -63,6 +63,7 @@ class ChainExecutor:
                 prompt=task.prompt,
                 negative_prompt=task.negative_prompt,
                 params=dict(task.params),
+                reference_image_path=task.reference_image_path,
             )
             self.queue_manager.add_task(gen_task)
 

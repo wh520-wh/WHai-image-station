@@ -1,10 +1,11 @@
 """The primary frontend runs without keys or external network access."""
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QObject, QUrl
+from PySide6.QtCore import QUrl
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtQml import QQmlApplicationEngine, QQmlEngine, QQmlExpression
 from PySide6.QtQuick import QQuickItem
@@ -14,6 +15,287 @@ from src.config.database import Database
 from src.config.event_loop import get_app_loop
 from src.desktop import StudioBridge
 from src.models.task import GenerationTask
+
+
+def test_workflow_preserves_full_settings_until_explicit_replacement(quick_studio, qtbot, tmp_path):
+    from PIL import Image
+
+    bridge, *_ = quick_studio
+    reference = tmp_path / "reference.png"
+    Image.new("RGB", (16, 12), "green").save(reference)
+    for key, value in {
+        "reference": str(reference),
+        "output_format": "webp",
+        "transparent": True,
+        "quality": "high",
+    }.items():
+        bridge.setDraft(key, value)
+    bridge.saveChain("", "saved settings", "first\nsecond")
+    qtbot.waitUntil(lambda: len(bridge.state["chains"]) == 1)
+    chain = bridge.chains.get_all_chains()[0]
+    chain_id = chain["id"]
+    bridge.chains.get_chain_status(chain_id).failure_mode = "skip"
+    original = chain["tasks"][0]
+    assert original["reference_image_path"] == str(reference)
+    assert original["params"]["output_format"] == "webp"
+    assert original["params"]["background"] == "transparent"
+
+    minimax = next(source for source in bridge._sources if source["interface_type"] == "minimax")
+    bridge.selectSource(minimax["id"])
+    bridge.setDraft("seed", "0")
+    bridge.saveChain(chain_id, "edited", "changed\nsecond\nextra", False)
+    qtbot.waitUntil(lambda: bridge.state["chains"][0]["name"] == "edited")
+    edited = bridge.chains.get_chain(chain_id)
+    assert edited["failure_mode"] == "skip"
+    assert len({task["task_id"] for task in edited["tasks"]}) == 3
+    for task in edited["tasks"]:
+        for key in ("source_id", "model_config_id", "params", "negative_prompt", "reference_image_path"):
+            assert task[key] == original[key]
+    get_app_loop().run_until_complete(bridge.chains.load_chains())
+    assert bridge.chains.get_chain(chain_id)["tasks"][0]["reference_image_path"] == str(reference)
+
+    bridge.saveChain(chain_id, "replaced", "new settings", True)
+    qtbot.waitUntil(lambda: bridge.state["chains"][0]["name"] == "replaced")
+    replaced = bridge.chains.get_chain(chain_id)["tasks"][0]
+    assert replaced["source_id"] == minimax["id"]
+    assert replaced["params"]["seed"] == 0
+    assert "background" not in replaced["params"]
+    assert "output_format" not in replaced["params"]
+
+
+def test_template_preserves_supported_parameters_and_reference(quick_studio, qtbot, tmp_path):
+    from PIL import Image
+
+    bridge, *_ = quick_studio
+    reference = tmp_path / "template-reference.png"
+    Image.new("RGB", (16, 12), "green").save(reference)
+    for key, value in {
+        "prompt": "a template",
+        "reference": str(reference),
+        "transparent": True,
+        "output_format": "webp",
+    }.items():
+        bridge.setDraft(key, value)
+    bridge.savePrompt("saved", "")
+    qtbot.waitUntil(lambda: len(bridge.state["prompts"]) == 1)
+    bridge.setDraft("reference", "")
+    bridge.setDraft("transparent", False)
+    bridge.usePrompt(bridge.state["prompts"][0])
+    assert bridge.state["draft"]["reference"] == str(reference)
+    assert bridge.state["draft"]["transparent"]
+    assert bridge.state["draft"]["output_format"] == "webp"
+
+
+def test_waiting_task_cancellation_updates_selected_preview(quick_studio):
+    bridge, *_ = quick_studio
+    task = GenerationTask(prompt="cancel this")
+    bridge.queue.add_task(task)
+    bridge.refresh_tasks()
+    bridge.selectTask(str(task.id))
+    bridge.cancelTask(str(task.id))
+    assert bridge.state["preview"]["status"] == "CANCELLED"
+    assert not bridge.state["tasks"]
+
+
+def test_compatible_options_survive_refresh_and_reuse(quick_studio):
+    bridge, *_ = quick_studio
+    loop = get_app_loop()
+    source = next(source for source in bridge._sources if source["id"] == bridge.state["sourceId"])
+    loop.run_until_complete(
+        bridge.db.save_source(dict(source, interface_type="custom", api_base_url="https://relay.test/v1"))
+    )
+    loop.run_until_complete(bridge.reload_sources())
+    bridge.setDraft("quality", "provider-specific")
+    bridge.setDraft("n", 3)
+    loop.run_until_complete(bridge.reload_sources())
+    assert bridge.state["draft"]["quality"] == "provider-specific"
+    assert bridge.state["draft"]["n"] == 3
+    bridge.usePrompt(
+        {
+            "source_id": source["id"],
+            "model_config_id": bridge.state["modelId"],
+            "prompt": "restored",
+            "params": {"size": "1280x768", "quality": "provider-specific", "n": 3, "seed": 0},
+        }
+    )
+    assert bridge.state["draft"]["quality"] == "provider-specific"
+    assert bridge.state["draft"]["n"] == 3
+    assert bridge.task_from_draft(require_key=False).params["seed"] == 0
+
+
+def test_entire_workflow_is_validated_before_normalized_tasks_start(quick_studio, monkeypatch):
+    bridge, *_ = quick_studio
+    loop = get_app_loop()
+    source = next(source for source in bridge._sources if source["id"] == bridge.state["sourceId"])
+    bfl = next(source for source in bridge._sources if source["interface_type"] == "bfl")
+    loop.run_until_complete(bridge.db.save_source(dict(source, interface_type="custom", auth_preset="none")))
+    loop.run_until_complete(bridge.db.save_source(dict(bfl, auth_preset="none")))
+    loop.run_until_complete(bridge.reload_sources())
+    flux_model = next(model for model in bridge._models if model["source_id"] == bfl["id"])
+    chain_id = loop.run_until_complete(
+        bridge.chains.create_chain(
+            {
+                "name": "legacy options",
+                "tasks": [
+                    {
+                        "prompt": "first",
+                        "source_id": source["id"],
+                        "model_config_id": bridge.state["modelId"],
+                        "negative_prompt": "blur",
+                        "params": {
+                            "size": "1280×768",
+                            "quality": "provider-specific",
+                            "n": 3,
+                            "seed": "0",
+                            "steps": 25,
+                            "guidance": 7,
+                        },
+                    },
+                    {
+                        "prompt": "second",
+                        "source_id": bfl["id"],
+                        "model_config_id": flux_model["id"],
+                        "params": {"size": "999x768", "n": 1},
+                    },
+                ],
+            }
+        )
+    )
+    started = []
+    monkeypatch.setattr(bridge.chains, "start_chain_background", started.append)
+    bridge.chainAction(chain_id, "start")
+    assert not started
+    runtime = bridge.chains.get_chain_status(chain_id)
+    assert runtime.tasks[0].params["size"] == "1280×768"
+    assert runtime.tasks[0].params["seed"] == "0"
+    runtime.tasks[1].params["size"] = "1024x1024"
+    bridge.chainAction(chain_id, "start")
+    assert started == [chain_id]
+    assert runtime.tasks[0].params == {
+        "size": "1280x768",
+        "quality": "provider-specific",
+        "n": 3,
+        "seed": 0,
+        "steps": 25,
+        "guidance": 7,
+    }
+    assert runtime.tasks[0].negative_prompt == "blur"
+
+
+def test_selected_task_and_image_survive_other_completions_and_gallery_filters(
+    quick_studio, qtbot, monkeypatch, tmp_path
+):
+    from PIL import Image
+    from PySide6.QtGui import QGuiApplication
+
+    from src.adapters.base import BaseAdapter, GenerationResult
+    from src.config import encryption
+    from src.managers.queue_manager import QueueManager
+
+    bridge, root, _, warnings = quick_studio
+    paths = {}
+    gates = {name: threading.Event() for name in ("A", "B")}
+    for name, colors in {"A": ("#cc5544", "#58a077"), "B": ("#4466cc", "#ccaa44")}.items():
+        paths[name] = []
+        for index, color in enumerate(colors):
+            path = tmp_path / f"{name}-{index}.png"
+            Image.new("RGB", (32, 24), color).save(path)
+            paths[name].append(str(path))
+
+    class ControlledAdapter(BaseAdapter):
+        async def generate(self, task, config):
+            while not gates[task.prompt].is_set():
+                await asyncio.sleep(0.01)
+            return GenerationResult(True, paths[task.prompt])
+
+        async def validate_config(self, config):
+            return True
+
+        def get_params_schema(self):
+            return {}
+
+    adapter = ControlledAdapter()
+    monkeypatch.setattr("src.managers.queue_manager.get_adapter", lambda _: adapter)
+    loop = get_app_loop()
+    source = next(source for source in bridge._sources if source["interface_type"] == "openai_images")
+    loop.run_until_complete(
+        bridge.db.save_source(dict(source, api_key_encrypted=encryption.encrypt("offline-placeholder")))
+    )
+    loop.run_until_complete(bridge.reload_sources())
+    bridge.selectSource(source["id"])
+    bridge.queue = QueueManager()
+    bridge.queue.max_concurrent = 2
+    loop.run_until_complete(bridge.queue.initialize(bridge.db))
+    loop.run_until_complete(bridge.queue.start())
+    try:
+        bridge.setDraft("prompt", "A")
+        bridge.generate()
+        task_a = bridge.state["selectedTaskId"]
+        bridge.setDraft("prompt", "B")
+        bridge.generate()
+        task_b = bridge.state["selectedTaskId"]
+        bridge.selectTask(task_a)
+        bridge.searchGallery("no matching record", "")
+        gates["B"].set()
+        qtbot.waitUntil(
+            lambda: any(task["task_id"] == task_b and task["status"] == "COMPLETED" for task in bridge.state["tasks"]),
+            timeout=5000,
+        )
+        assert bridge.state["selectedTaskId"] == task_a
+        assert not bridge.state["preview"]["images"]
+
+        gates["A"].set()
+        qtbot.waitUntil(lambda: bridge.state["preview"].get("status") == "COMPLETED", timeout=5000)
+        assert bridge.state["preview"]["result_paths"] == paths["A"]
+        assert len(bridge.state["preview"]["images"]) == 2
+        qtbot.waitUntil(lambda: not bridge.state["galleryLoading"])
+        assert bridge.state["galleryTotal"] == 0
+        bridge.selectPreviewImage(1)
+        qtbot.wait(50)
+        page = root.property("activePageLoader").property("item")
+        expression = QQmlExpression(QQmlEngine.contextForObject(page), page, "imagePath")
+        assert expression.evaluate()[0] == paths["A"][1]
+        assert not expression.hasError()
+
+        target = tmp_path / "selected-result.png"
+        monkeypatch.setattr("src.desktop.QFileDialog.getSaveFileName", lambda *args: (str(target), "PNG"))
+        for name in ("savePreviewButton", "copyPreviewButton", "referencePreviewButton"):
+            click = QQmlExpression(QQmlEngine.contextForObject(page), page, name + ".clicked()")
+            click.evaluate()
+            assert not click.hasError(), click.error().toString()
+            if name == "savePreviewButton":
+                qtbot.waitUntil(target.exists)
+                assert target.read_bytes() == Path(paths["A"][1]).read_bytes()
+            elif name == "copyPreviewButton":
+                qtbot.waitUntil(
+                    lambda: (
+                        not QGuiApplication.clipboard().image().isNull()
+                        and QGuiApplication.clipboard().image().pixelColor(0, 0).name() == "#58a077"
+                    )
+                )
+            else:
+                assert bridge.state["draft"]["reference"] == paths["A"][1]
+
+        requested = []
+        bridge.viewerRequested.connect(requested.append)
+        bridge.viewPreview()
+        assert requested[-1]["selected_image_index"] == 1
+        qtbot.wait(30)
+        assert root.property("modalOpen")
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        count = len(bridge.queue.get_task_snapshots(100))
+        QTest.keyClick(root, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
+        qtbot.wait(100)
+        assert len(bridge.queue.get_task_snapshots(100)) == count
+        expression = QQmlExpression(QQmlEngine.contextForObject(page), page, "previewPicture.source.toString()")
+        assert expression.evaluate()[0] == QUrl.fromLocalFile(paths["A"][1]).toString()
+        assert not warnings, warnings
+    finally:
+        gates["A"].set()
+        gates["B"].set()
+        loop.run_until_complete(bridge.queue.stop())
 
 
 @pytest.fixture
@@ -205,7 +487,7 @@ def test_copy_and_save_image_keep_original_pixels(quick_studio, qtbot, tmp_path,
     qtbot.waitUntil(lambda: not bridge._state["busy"])
     assert destination.read_bytes() == original.read_bytes()
     bridge.copyImage(str(original))
-    qtbot.waitUntil(lambda: not QGuiApplication.clipboard().image().isNull())
+    qtbot.waitUntil(lambda: QGuiApplication.clipboard().image().width() == 16)
     assert QGuiApplication.clipboard().image().width() == 16
 
 

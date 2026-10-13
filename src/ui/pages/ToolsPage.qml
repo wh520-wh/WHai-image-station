@@ -8,8 +8,35 @@ Item {
     property var shell
     readonly property var s: studio.state
     property string chainId: ""
+    property var editingChain: ({})
+    readonly property var savedTask: (editingChain.tasks || [])[0] || ({})
+    function sourceLabel(id) {
+        const source = (s.sources || []).find(x => x.id === id);
+        return source ? source.name : "来源不可用";
+    }
+    function modelLabel(id) {
+        const model = (s.models || []).find(x => x.id === id);
+        return model ? model.display_name : "模型不可用";
+    }
+    function settingsSummary(task) {
+        const params = task.params || {};
+        const parts = [params.size, params.quality, String(params.n || 1) + " 张"].filter(x => !!x);
+        if (params.seed !== undefined && String(params.seed) !== "")
+            parts.push("种子 " + params.seed);
+        if (params.output_format)
+            parts.push(params.output_format.toUpperCase());
+        if (params.background === "transparent" || params.transparent)
+            parts.push("透明背景");
+        if (task.reference_image_path)
+            parts.push("已保存参考图");
+        if (task.negative_prompt)
+            parts.push("含排除内容");
+        return parts.join(" · ");
+    }
     function edit(chain) {
         chainId = chain.id;
+        editingChain = chain;
+        useCurrentSettings.checked = false;
         name.text = chain.name;
         steps.text = chain.tasks.map(x => x.prompt).join("\n");
     }
@@ -49,6 +76,8 @@ Item {
                         iconName: "create"
                         onClicked: {
                             page.chainId = "";
+                            page.editingChain = ({});
+                            useCurrentSettings.checked = true;
                             name.text = "";
                             steps.text = "";
                         }
@@ -64,11 +93,12 @@ Item {
                     delegate: Rectangle {
                         required property var modelData
                         width: ListView.view.width
-                        height: 150
+                        height: chainContent.implicitHeight + 32
                         color: Theme.surface
                         radius: 12
                         border.color: page.chainId === modelData.id ? Theme.accent : Theme.border
                         ColumnLayout {
+                            id: chainContent
                             anchors.fill: parent
                             anchors.margins: 16
                             spacing: 10
@@ -85,7 +115,20 @@ Item {
                                         failed: "执行失败"
                                     })[modelData.status] + " · " + modelData.tasks.filter(x => x.status === "completed").length + "/" + modelData.tasks.length + " 步"
                             }
-                            RowLayout {
+                            Caption {
+                                Layout.fillWidth: true
+                                text: page.sourceLabel((modelData.tasks[0] || {}).source_id) + " · " + page.modelLabel((modelData.tasks[0] || {}).model_config_id)
+                                elide: Text.ElideRight
+                                maximumLineCount: 1
+                            }
+                            Caption {
+                                Layout.fillWidth: true
+                                text: page.settingsSummary(modelData.tasks[0] || {})
+                                font.pixelSize: 11
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                            }
+                            Flow {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 MButton {
@@ -138,40 +181,104 @@ Item {
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 22
-                    spacing: 15
-                    Heading {
-                        text: page.chainId ? "编辑流程" : "新建流程"
-                        font.pixelSize: 18
-                    }
-                    Caption {
-                        text: "流程名称"
-                    }
-                    MField {
-                        id: name
-                        Layout.fillWidth: true
-                        placeholderText: "例如：四季海报"
-                    }
-                    Caption {
-                        text: "生成步骤 · 每行一个提示词"
-                    }
+                    spacing: 12
                     ScrollView {
+                        id: editorScroll
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        MTextArea {
-                            id: steps
-                            placeholderText: "春日的花园，柔和晨光\n夏夜的海边，清澈星空\n秋天的山林，温暖色彩\n冬日的街角，轻盈落雪"
+                        contentWidth: availableWidth
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ColumnLayout {
+                            width: editorScroll.availableWidth
+                            spacing: 12
+                            Heading {
+                                text: page.chainId ? "编辑流程" : "新建流程"
+                                font.pixelSize: 18
+                            }
+                            Caption {
+                                text: "流程名称"
+                            }
+                            MField {
+                                id: name
+                                objectName: "chainName"
+                                Layout.fillWidth: true
+                                placeholderText: "例如：四季海报"
+                            }
+                            Caption {
+                                text: "生成步骤 · 每行一个提示词"
+                            }
+                            ScrollView {
+                                id: stepsScroll
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: page.height < 650 ? 140 : 210
+                                clip: true
+                                contentWidth: availableWidth
+                                MTextArea {
+                                    id: steps
+                                    objectName: "chainSteps"
+                                    width: stepsScroll.availableWidth
+                                    placeholderText: "春日的花园，柔和晨光\n夏夜的海边，清澈星空\n秋天的山林，温暖色彩\n冬日的街角，轻盈落雪"
+                                }
+                            }
+                            CheckBox {
+                                id: useCurrentSettings
+                                objectName: "chainUseCurrentSettings"
+                                text: "改用创作页当前设置"
+                                visible: !!page.chainId
+                                checked: true
+                                Layout.fillWidth: true
+                                palette.windowText: Theme.ink
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: settingsContent.implicitHeight + 20
+                                radius: 9
+                                color: Theme.subtle
+                                ColumnLayout {
+                                    id: settingsContent
+                                    anchors.fill: parent
+                                    anchors.margins: 10
+                                    spacing: 5
+                                    Caption {
+                                        text: page.chainId && !useCurrentSettings.checked ? "保留流程已保存的设置" : "使用创作页当前设置"
+                                        color: Theme.ink
+                                        font.weight: Font.DemiBold
+                                        Layout.fillWidth: true
+                                    }
+                                    Caption {
+                                        text: page.sourceLabel(page.chainId && !useCurrentSettings.checked ? page.savedTask.source_id : s.sourceId) + " · " + page.modelLabel(page.chainId && !useCurrentSettings.checked ? page.savedTask.model_config_id : s.modelId)
+                                        Layout.fillWidth: true
+                                    }
+                                    Caption {
+                                        text: page.settingsSummary(page.chainId && !useCurrentSettings.checked ? page.savedTask : ({
+                                                params: {
+                                                    size: s.draft.size,
+                                                    quality: s.draft.quality,
+                                                    n: s.draft.n,
+                                                    seed: s.caps.seed ? s.draft.seed : undefined,
+                                                    output_format: s.caps.format ? s.draft.output_format : "",
+                                                    transparent: s.caps.format && s.draft.transparent
+                                                },
+                                                reference_image_path: s.caps.reference ? s.draft.reference : "",
+                                                negative_prompt: s.caps.negative ? s.draft.negative_prompt : ""
+                                            }))
+                                        Layout.fillWidth: true
+                                        font.pixelSize: 11
+                                    }
+                                }
+                            }
+                            Caption {
+                                text: "每一步独立生成，" + (page.editingChain.failure_mode === "skip" ? "失败后跳过该步继续" : "失败后停止") + "；暂停会等待正在生成的步骤完成。"
+                                Layout.fillWidth: true
+                            }
                         }
-                    }
-                    Caption {
-                        text: "使用创作页当前来源、模型与参数。每一步独立生成，失败后停止；暂停会等待正在生成的步骤完成。"
-                        Layout.fillWidth: true
                     }
                     MButton {
                         text: "保存流程"
                         primary: true
                         Layout.fillWidth: true
-                        onClicked: studio.saveChain(page.chainId, name.text, steps.text)
+                        onClicked: studio.saveChain(page.chainId, name.text, steps.text, !page.chainId || useCurrentSettings.checked)
                     }
                 }
             }
