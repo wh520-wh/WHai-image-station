@@ -94,6 +94,8 @@ QML 页面通过 Loader 切换，持久化和草稿状态保留在 StudioBridge�
 
 新增 QML 模块时同步更新 tools/pyinstaller_hooks/hook-PySide6.QtQml.py 的模块列表，并对打包程序进行离线启动检查。该列表当前包含 QtQml、QtQuick、Controls Basic、Templates、Layouts、Window 与 Shapes。
 
+Qt 运行版本固定为 PySide6 6.11.1。升级时先在隔离环境完成全部测试及打包程序的正常退出检查，再同时更新 pyproject.toml 与 requirements.txt，避免开发机和 CI 自动选到不同的 Qt 版本。
+
 Windows 打包使用 build.py：它优先选择解释器与系统 DLL，spec 排除外部工具提供的 ICU。Qt 需要 Windows 自带的 ICU ABI；Conda、Poppler 等工具的同名 ICU DLL 不能代替它。可用 `--smoke-test=<隔离目录>` 检查打包应用，自动初始化无密钥测试数据、切换六个页面、关闭并写入 report.json。测试不会请求生图服务。
 
 ## 提交规范

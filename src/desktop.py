@@ -397,7 +397,7 @@ class StudioBridge(QObject):
         record = self._state["preview"]
         start = record.get("started_at") or record.get("created_at")
         elapsed = ""
-        if start:
+        if start and (record.get("completed_at") or record.get("status") in ("WAITING", "PENDING", "GENERATING")):
             try:
                 begin = datetime.fromisoformat(start)
                 end = (

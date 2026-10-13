@@ -3,6 +3,8 @@ import QtQuick.Controls.Basic
 
 TextArea {
     id: root
+    // Wrapped placeholder height must not feed back into the ScrollView width.
+    implicitHeight: Math.max(100, contentHeight + topPadding + bottomPadding)
     color: Theme.ink
     placeholderTextColor: Theme.muted
     selectionColor: Theme.accentWash

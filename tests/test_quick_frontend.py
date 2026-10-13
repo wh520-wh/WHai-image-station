@@ -97,6 +97,12 @@ def test_waiting_task_cancellation_updates_selected_preview(quick_studio):
     assert not bridge.state["tasks"]
 
 
+def test_legacy_completed_record_does_not_invent_elapsed_time(quick_studio):
+    bridge, *_ = quick_studio
+    bridge._publish_preview({"task_id": "legacy", "status": "COMPLETED", "created_at": "2026-01-01T00:00:00"})
+    assert bridge.state["previewElapsed"] == ""
+
+
 def test_compatible_options_survive_refresh_and_reuse(quick_studio):
     bridge, *_ = quick_studio
     loop = get_app_loop()
